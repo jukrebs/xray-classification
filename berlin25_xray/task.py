@@ -43,27 +43,37 @@ logger = logging.getLogger(__name__)
 
 
 class Net(nn.Module):
-    """CXformer-base backbone (X-ray pretrained) + binary head."""
+    """CXformer-base backbone (X-ray pretrained) + small head ensemble."""
 
-    def __init__(self, image_size: int = DEFAULT_IMAGE_SIZE):
+    def __init__(self, image_size: int = DEFAULT_IMAGE_SIZE, num_heads: int = 4):
         super(Net, self).__init__()
 
         self.model_name = "m42-health/CXformer-base"
         self.image_size = image_size
+        self.num_heads = max(int(num_heads), 1)
 
-        # 1) Load CXformer backbone (DINOv2-with-registers variant)
-        #    This is a pure vision encoder pretrained on chest X-rays.
+        # Load CXformer backbone (DINOv2-with-registers variant), pretrained on chest X-rays.
         self.backbone = AutoModel.from_pretrained(self.model_name)
 
-        # 2) Freeze backbone parameters (we'll only train the small head)
+        # Freeze backbone parameters (we'll only train the small head ensemble).
         for p in self.backbone.parameters():
             p.requires_grad = False
 
-        # 3) Hidden size comes from the config (typically 768)
+        # Hidden size comes from the config (typically 768).
         hidden_dim = self.backbone.config.hidden_size
 
-        # 4) Binary classification head: any finding vs no finding
-        self.classifier = nn.Linear(hidden_dim, 1)
+        # Small ensemble of binary heads: any finding vs no finding.
+        self.heads = nn.ModuleList(
+            [nn.Linear(hidden_dim, 1) for _ in range(self.num_heads)]
+        )
+
+        # CXformer uses ImageNet-style normalization.
+        mean_vals = (0.485, 0.456, 0.406)
+        std_vals = (0.229, 0.224, 0.225)
+        mean = torch.tensor(mean_vals).view(1, 3, 1, 1)
+        std = torch.tensor(std_vals).view(1, 3, 1, 1)
+        self.register_buffer("cx_mean", mean, persistent=False)
+        self.register_buffer("cx_std", std, persistent=False)
 
     def forward(self, x):
         # x: [B, 1, H, W], already preprocessed:
@@ -71,26 +81,25 @@ class Net(nn.Module):
         #    - Grayscale
         #    - Normalize(mean=[0.5], std=[0.5]) → ~[-1, 1]
 
-        # a) Map back to [0, 1]
+        # Map back to [0, 1].
         x = (x + 1.0) / 2.0  # [-1,1] -> [0,1]
 
-        # b) CXformer expects 3-channel input; repeat grayscale channel
+        # CXformer expects 3-channel input; repeat grayscale channel.
         if x.shape[1] == 1:
             x = x.repeat(1, 3, 1, 1)  # [B, 3, H, W]
 
-        # c) Forward through backbone (DINOv2-style)
-        #    Dinov2WithRegistersModel uses 'pixel_values' as input key.
+        # Match CXformer training normalization.
+        x = (x - self.cx_mean) / self.cx_std
+
+        # Forward through backbone (DINOv2-style, uses 'pixel_values' as input key).
         outputs = self.backbone(pixel_values=x)
 
-        # outputs.last_hidden_state: [B, N_tokens, hidden_dim]
-        tokens = outputs.last_hidden_state
+        # Use the model's pooled representation (handles registers/cls internally).
+        pooled = outputs.pooler_output  # [B, hidden_dim]
 
-        # d) Pool tokens → one embedding per image
-        #    Simple and effective: average over tokens
-        pooled = tokens.mean(dim=1)  # [B, hidden_dim]
-
-        # e) Binary logit
-        logits = self.classifier(pooled)  # [B, 1]
+        # Forward through all heads and average logits: [B, 1, num_heads] -> [B, 1]
+        head_logits = [head(pooled) for head in self.heads]  # list of [B, 1]
+        logits = torch.stack(head_logits, dim=-1).mean(dim=-1)
 
         return logits  # BCEWithLogitsLoss expects raw logits
 
