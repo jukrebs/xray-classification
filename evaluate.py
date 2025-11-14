@@ -7,14 +7,16 @@ import os
 
 import torch
 import wandb
-from berlin25_xray.task import Net, load_data, test
 from sklearn.metrics import roc_auc_score
+
+from berlin25_xray.task import Net, load_data, test
 
 # Suppress W&B directory warning
 os.environ["WANDB_DIR"] = os.path.expanduser("~/.cache/wandb")
 
 # W&B model path: update with your best model
-WANDB_MODEL_PATH = "coldstart2025-team00/coldstart2025/job_004032_round1_auroc6036:v0"
+# Format: "your-wandb-username/your-project-name/model-artifact-name:version"
+WANDB_MODEL_PATH = "justus-krebs-technische-universit-t-berlin/hackathon/vt:v0"
 DATASET_DIR = os.environ["DATASET_DIR"]
 
 
