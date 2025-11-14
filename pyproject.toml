@@ -57,7 +57,7 @@ default = "cluster-gpu"
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 3
 
-[tool.flwr.federations.cluster-gpu]
+[tool.flwr.federations.cluster]
 options.num-supernodes = 3
 options.backend.client-resources.num-cpus = 2
 options.backend.client-resources.num-gpus = 0.33
