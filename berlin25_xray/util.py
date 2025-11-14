@@ -4,8 +4,10 @@ These functions should not be changed by hackathon participants, unless you want
 to log additional metrics or save models based on different criteria.
 """
 
+import logging
 import os
 import warnings
+from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -19,6 +21,48 @@ from berlin25_xray.task import (
 
 # Suppress protobuf deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="google.protobuf")
+
+logger = logging.getLogger(__name__)
+
+
+def _iter_metric_replies(replies, stage: str):
+    """Yield (reply, metrics_dict) pairs for replies that contain metrics."""
+    for reply in replies:
+        if reply is None:
+            logger.warning("Skipping %s reply: entry is None", stage)
+            continue
+        has_content_fn = getattr(reply, "has_content", None)
+        try:
+            if callable(has_content_fn) and not has_content_fn():
+                logger.warning(
+                    "Skipping %s reply: message has no content (node=%s)",
+                    stage,
+                    getattr(reply, "node_id", "unknown"),
+                )
+                continue
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Skipping %s reply: unable to determine content presence (%s)",
+                stage,
+                exc,
+            )
+            continue
+
+        content = getattr(reply, "content", None)
+        if not isinstance(content, Mapping):
+            logger.warning(
+                "Skipping %s reply: unexpected content type %s",
+                stage,
+                type(content),
+            )
+            continue
+
+        metrics = content.get("metrics")
+        if not isinstance(metrics, Mapping):
+            logger.warning("Skipping %s reply: no 'metrics' payload", stage)
+            continue
+
+        yield reply, metrics
 
 
 def compute_metrics(reply_metrics):
@@ -37,14 +81,37 @@ def compute_metrics(reply_metrics):
 
 def compute_aggregated_metrics(replies):
     """Compute aggregated metrics across all hospitals."""
-    all_probs = [p for r in replies for p in r.content["metrics"]["probs"]]
-    all_labels = [l for r in replies for l in r.content["metrics"]["labels"]]
-    roc_auc = roc_auc_score(np.array(all_labels), np.array(all_probs))
+    metrics_payloads = [metrics for _, metrics in _iter_metric_replies(replies, "evaluation")]
+    if not metrics_payloads:
+        logger.warning("No evaluation replies with metrics; returning NaN aggregates.")
+        return {
+            "roc_auc": float("nan"),
+            "sensitivity": float("nan"),
+            "specificity": float("nan"),
+            "precision": float("nan"),
+            "f1": float("nan"),
+        }
 
-    tp = sum(r.content["metrics"]["tp"] for r in replies)
-    tn = sum(r.content["metrics"]["tn"] for r in replies)
-    fp = sum(r.content["metrics"]["fp"] for r in replies)
-    fn = sum(r.content["metrics"]["fn"] for r in replies)
+    all_probs = np.concatenate(
+        [np.asarray(metrics.get("probs", [])) for metrics in metrics_payloads]
+    )
+    all_labels = np.concatenate(
+        [np.asarray(metrics.get("labels", [])) for metrics in metrics_payloads]
+    )
+    if all_probs.size == 0 or all_labels.size == 0:
+        roc_auc = float("nan")
+        logger.warning("Evaluation replies lacked probability/label data; ROC-AUC set to NaN.")
+    else:
+        try:
+            roc_auc = roc_auc_score(all_labels, all_probs)
+        except ValueError as err:
+            logger.warning("Unable to compute ROC-AUC: %s", err)
+            roc_auc = float("nan")
+
+    tp = sum(int(metrics.get("tp", 0)) for metrics in metrics_payloads)
+    tn = sum(int(metrics.get("tn", 0)) for metrics in metrics_payloads)
+    fp = sum(int(metrics.get("fp", 0)) for metrics in metrics_payloads)
+    fn = sum(int(metrics.get("fn", 0)) for metrics in metrics_payloads)
     cm_metrics = compute_metrics_from_confusion_matrix(tp, tn, fp, fn)
 
     return {"roc_auc": roc_auc, **cm_metrics}
@@ -53,21 +120,53 @@ def compute_aggregated_metrics(replies):
 def log_training_metrics(replies, server_round):
     """Log training metrics to W&B."""
     log_dict = {}
-    for reply in replies:
-        hospital = f"Hospital{PARTITION_HOSPITAL_MAP[reply.content['metrics']['partition-id']]}"
-        log_dict[f"{hospital}/train_loss"] = reply.content["metrics"]["train_loss"]
+    for reply, metrics in _iter_metric_replies(replies, "train"):
+        partition_id = metrics.get("partition-id")
+        train_loss = metrics.get("train_loss")
+        if partition_id is None or train_loss is None:
+            logger.warning("Skipping train reply missing partition or train_loss metric.")
+            continue
+        try:
+            hospital = f"Hospital{PARTITION_HOSPITAL_MAP[int(partition_id)]}"
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "Skipping train reply due to unknown partition-id value: %s", partition_id
+            )
+            continue
+        log_dict[f"{hospital}/train_loss"] = train_loss
+    if not log_dict:
+        logger.warning(
+            "No training metrics collected for server round %s; skipping W&B log.",
+            server_round,
+        )
+        return
     wandb.log(log_dict, step=server_round)
 
 
 def log_eval_metrics(replies, agg_metrics, server_round, weighted_by_key, log_fn):
     """Log evaluation metrics to console and W&B."""
+    metric_replies = list(_iter_metric_replies(replies, "evaluation"))
+    if not metric_replies:
+        log_fn("No evaluation replies with metrics to report.")
+        return
+
     log_fn("EVALUATION METRICS BY HOSPITAL")
     log_dict = {}
-
-    for reply in replies:
-        hospital = f"Hospital{PARTITION_HOSPITAL_MAP[reply.content['metrics']['partition-id']]}"
-        metrics = compute_metrics(reply.content["metrics"])
-        n = reply.content["metrics"].get(weighted_by_key, 0)
+    for reply, reply_metrics in metric_replies:
+        partition_id = reply_metrics.get("partition-id")
+        if partition_id is None:
+            logger.warning("Skipping evaluation reply missing partition-id.")
+            continue
+        try:
+            hospital = f"Hospital{PARTITION_HOSPITAL_MAP[int(partition_id)]}"
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "Skipping evaluation reply due to unknown partition-id value: %s",
+                partition_id,
+            )
+            continue
+        metrics = compute_metrics(reply_metrics)
+        n = reply_metrics.get(weighted_by_key, 0)
 
         log_fn(f"  {hospital} (n={n}):")
         for k, v in metrics.items():
@@ -79,6 +178,12 @@ def log_eval_metrics(replies, agg_metrics, server_round, weighted_by_key, log_fn
         log_fn(f"  {k:12s}: {v:.4f}")
         log_dict[f"Global/{k}"] = v
 
+    if not log_dict:
+        logger.warning(
+            "Evaluation log dictionary is empty for round %s; skipping W&B log.",
+            server_round,
+        )
+        return
     wandb.log(log_dict, step=server_round)
 
 

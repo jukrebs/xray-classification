@@ -3,11 +3,12 @@
 import logging
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
-from datasets import load_from_disk
+from datasets import Dataset, concatenate_datasets, load_from_disk
 try:
     from torch import amp  # PyTorch >= 2.0 preferred API
 except ImportError:  # pragma: no cover - fallback for older runtimes
@@ -94,6 +95,26 @@ def collate_preprocessed(batch):
     return result
 
 
+def _load_split_from_arrow(dataset_path: str, split_name: str):
+    """Load a dataset split directly from Arrow shards, bypassing HF metadata."""
+    split_dir = Path(dataset_path) / split_name
+    if not split_dir.exists():
+        raise FileNotFoundError(
+            f"Split directory {split_dir} is missing. Ensure DATASET_DIR is correct."
+        )
+
+    arrow_files = sorted(split_dir.glob("*.arrow"))
+    if not arrow_files:
+        raise FileNotFoundError(
+            f"No Arrow files found in {split_dir}. Dataset export could be corrupted."
+        )
+
+    datasets = [Dataset.from_file(str(arrow_file)) for arrow_file in arrow_files]
+    if len(datasets) == 1:
+        return datasets[0]
+    return concatenate_datasets(datasets)
+
+
 def load_data(
     dataset_name: str,
     split_name: str,
@@ -136,8 +157,18 @@ def load_data(
                 split_name,
                 dataset_path,
             )
-            full_dataset = load_from_disk(dataset_path)
-            hospital_datasets[cache_key] = full_dataset[split_name]
+            try:
+                full_dataset = load_from_disk(dataset_path)
+                split_dataset = full_dataset[split_name]
+            except (TypeError, ValueError) as err:
+                logger.warning(
+                    "load_from_disk failed for %s/%s (%s). Falling back to Arrow loader.",
+                    dataset_name,
+                    split_name,
+                    err,
+                )
+                split_dataset = _load_split_from_arrow(dataset_path, split_name)
+            hospital_datasets[cache_key] = split_dataset
         else:
             logger.info("Cache hit for %s/%s", dataset_name, split_name)
 
