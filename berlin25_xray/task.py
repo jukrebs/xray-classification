@@ -1,15 +1,17 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
 import os
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
-from torchvision import models
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
+from transformers import AutoImageProcessor, AutoModel
 
 PARTITION_HOSPITAL_MAP = {
     0: "A",
@@ -21,26 +23,78 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 
 class Net(nn.Module):
-    """Starting point: ResNet18-based model for binary chest X-ray classification."""
+    """CXformer-based encoder with lightweight binary classification head."""
 
-    def __init__(self):
-        super(Net, self).__init__()
-        self.model = models.resnet18(weights=None)
-        # Adapt to grayscale input
-        self.model.conv1 = nn.Conv2d(
-            in_channels=1,
-            out_channels=64,
-            kernel_size=7,
-            stride=2,
-            padding=3,
-            bias=False,
+    def __init__(self, model_name: Optional[str] = None):
+        super().__init__()
+        self.model_name = model_name or os.environ.get(
+            "XRAY_BACKBONE", "m42-health/CXformer-base"
         )
-        # Binary classification head (single logit)
-        in_features = self.model.fc.in_features
-        self.model.fc = nn.Linear(in_features, 1)
+        self.image_processor = AutoImageProcessor.from_pretrained(self.model_name)
+        self.encoder = AutoModel.from_pretrained(self.model_name)
 
-    def forward(self, x):
-        return self.model(x)  # No sigmoid, using BCEWithLogitsLoss
+        hidden_size = getattr(self.encoder.config, "hidden_size", None) or getattr(
+            self.encoder.config, "embed_dim", None
+        )
+        if hidden_size is None:
+            raise ValueError(
+                "Unable to determine hidden size for CXformer encoder configuration."
+            )
+
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Dropout(p=0.1),
+            nn.Linear(hidden_size, 1),
+        )
+
+        size_cfg = self.image_processor.size
+        if isinstance(size_cfg, dict):
+            height = size_cfg.get("height") or size_cfg.get("shortest_edge") or 518
+            width = size_cfg.get("width") or size_cfg.get("shortest_edge") or height
+        elif isinstance(size_cfg, (list, tuple)):
+            height, width = size_cfg
+        else:
+            height = width = int(size_cfg)
+        self.target_size = (int(height), int(width))
+
+        mean = torch.tensor(
+            self.image_processor.image_mean, dtype=torch.float32
+        ).view(1, -1, 1, 1)
+        std = torch.tensor(
+            self.image_processor.image_std, dtype=torch.float32
+        ).view(1, -1, 1, 1)
+        if mean.shape[1] == 1:
+            mean = mean.repeat(1, 3, 1, 1)
+            std = std.repeat(1, 3, 1, 1)
+        self.register_buffer("processor_mean", mean)
+        self.register_buffer("processor_std", std)
+
+    def _prepare_pixel_values(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.float()
+        # Undo previous grayscale normalization if needed (data stored as [-1, 1]).
+        x_detached = x.detach()
+        if (x_detached.min() < 0) or (x_detached.max() > 1):
+            x = x * 0.5 + 0.5
+        x = torch.clamp(x, 0.0, 1.0)
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+        if tuple(x.shape[-2:]) != self.target_size:
+            x = F.interpolate(
+                x,
+                size=self.target_size,
+                mode="bicubic",
+                align_corners=False,
+            )
+        return (x - self.processor_mean) / self.processor_std
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pixel_values = self._prepare_pixel_values(x)
+        outputs = self.encoder(pixel_values=pixel_values)
+        if getattr(outputs, "pooler_output", None) is not None:
+            features = outputs.pooler_output
+        else:
+            features = outputs.last_hidden_state[:, 0]
+        return self.classifier(features)
 
 
 def collate_preprocessed(batch):
@@ -49,7 +103,9 @@ def collate_preprocessed(batch):
     for key in batch[0].keys():
         if key in ["x", "y"]:
             # Convert lists back to tensors and stack
-            result[key] = torch.stack([torch.tensor(item[key]) for item in batch])
+            result[key] = torch.stack(
+                [torch.tensor(item[key], dtype=torch.float32) for item in batch]
+            )
         else:
             # Keep other fields as lists
             result[key] = [item[key] for item in batch]
@@ -100,13 +156,13 @@ def load_data(
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=0.01)
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
         for batch in tqdm(trainloader):
-            x = batch["x"].to(device)
-            y = batch["y"].to(device)
+            x = batch["x"].to(device, non_blocking=True).float()
+            y = batch["y"].to(device, non_blocking=True).float()
             optimizer.zero_grad()
             outputs = net(x)
             loss = criterion(outputs, y)
@@ -139,8 +195,8 @@ def test(net, testloader, device):
     all_labels = []
     with torch.no_grad():
         for batch in testloader:
-            x = batch["x"].to(device)
-            y = batch["y"].to(device)
+            x = batch["x"].to(device, non_blocking=True).float()
+            y = batch["y"].to(device, non_blocking=True).float()
             outputs = net(x)
             loss = criterion(outputs, y)
             total_loss += loss.item()
