@@ -25,13 +25,20 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 class Net(nn.Module):
     """CXformer-based encoder with lightweight binary classification head."""
 
-    def __init__(self, model_name: Optional[str] = None):
+    def __init__(self, model_name: Optional[str] = None, trust_remote_code: Optional[bool] = None):
         super().__init__()
         self.model_name = model_name or os.environ.get(
             "XRAY_BACKBONE", "m42-health/CXformer-base"
         )
-        self.image_processor = AutoImageProcessor.from_pretrained(self.model_name)
-        self.encoder = AutoModel.from_pretrained(self.model_name)
+        if trust_remote_code is None:
+            env_flag = os.environ.get("XRAY_TRUST_REMOTE_CODE", "true").lower()
+            trust_remote_code = env_flag in {"1", "true", "yes"}
+        self.image_processor = AutoImageProcessor.from_pretrained(
+            self.model_name, trust_remote_code=trust_remote_code
+        )
+        self.encoder = AutoModel.from_pretrained(
+            self.model_name, trust_remote_code=trust_remote_code
+        )
 
         hidden_size = getattr(self.encoder.config, "hidden_size", None) or getattr(
             self.encoder.config, "embed_dim", None
@@ -116,7 +123,7 @@ def load_data(
     dataset_name: str,
     split_name: str,
     image_size: int = 128,
-    batch_size: int = 16,
+    batch_size: int = 1024,
 ):
     """Load hospital X-ray data.
 
