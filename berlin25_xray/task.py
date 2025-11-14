@@ -39,8 +39,10 @@ DEFAULT_BATCH_SIZE = 16
 DEFAULT_EVAL_BATCH_SIZE = 32
 
 # CXformer tuning hyperparameters
-CXFORMER_TUNE_LAST_N_LAYERS = 4
-CXFORMER_BACKBONE_LR_SCALE = 0.1  # backbone LR = head LR * scale
+# Unfreeze and finetune the last N transformer blocks.
+CXFORMER_TUNE_LAST_N_LAYERS = 8
+# Use a moderately higher LR for the (partially) unfrozen backbone.
+CXFORMER_BACKBONE_LR_SCALE = 0.3  # backbone LR = head LR * scale
 
 PARTITION_HOSPITAL_MAP = {
     0: "A",
@@ -90,7 +92,7 @@ class Net(nn.Module):
                 nn.Sequential(
                     nn.Linear(hidden_dim, hidden_dim // 2),
                     nn.GELU(),
-                    nn.Dropout(p=0.1),
+                    nn.Dropout(p=0.2),
                     nn.Linear(hidden_dim // 2, 1),
                 )
                 for _ in range(self.num_heads)
