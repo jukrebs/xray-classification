@@ -1,11 +1,18 @@
 import logging
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
+from berlin25_xray.fedbn import (
+    BatchNormState,
+    capture_bn_state,
+    get_non_bn_state_dict,
+    load_non_bn_state_dict,
+    restore_bn_state,
+)
 from berlin25_xray.logging_utils import configure_logging, log_gpu_utilization
 from berlin25_xray.task import (
     DEFAULT_BATCH_SIZE,
@@ -20,6 +27,7 @@ from berlin25_xray.task import train as train_fn
 app = ClientApp()
 configure_logging()
 logger = logging.getLogger(__name__)
+_LOCAL_BN_STATE: Optional[BatchNormState] = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,19 @@ def _unwrap_compiled_model(model):
     """Return the original nn.Module even if torch.compile wrapped it."""
 
     return getattr(model, "_orig_mod", model)
+
+
+def _restore_bn_from_cache(model):
+    """Load cached BatchNorm state (if available) into ``model``."""
+
+    restore_bn_state(model, _LOCAL_BN_STATE)
+
+
+def _update_bn_cache(model):
+    """Update the cached BatchNorm state from ``model``."""
+
+    global _LOCAL_BN_STATE
+    _LOCAL_BN_STATE = capture_bn_state(model)
 
 
 def _load_partition_split(partition_id: int, split: str, image_size: int, batch_size: int):
@@ -84,7 +105,8 @@ def train(msg: Message, context: Context):
     # Load the model and initialize it with the received weights
     settings = resolve_client_settings(context.run_config)
     model = Net(image_size=settings.image_size)
-    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+    load_non_bn_state_dict(model, msg.content["arrays"].to_torch_state_dict())
+    _restore_bn_from_cache(model)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     logger.info("Starting client training on %s", device)
     model.to(device)
@@ -121,7 +143,8 @@ def train(msg: Message, context: Context):
 
     # Construct and return reply Message
     state_src = _unwrap_compiled_model(model)
-    model_record = ArrayRecord(state_src.state_dict())
+    _update_bn_cache(state_src)
+    model_record = ArrayRecord(get_non_bn_state_dict(state_src))
     metrics = {
         "partition-id": context.node_config["partition-id"],
         "train_loss": train_loss,
@@ -137,7 +160,8 @@ def evaluate(msg: Message, context: Context):
     """Evaluate the model on local data."""
     settings = resolve_client_settings(context.run_config)
     model = Net(image_size=settings.image_size)
-    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+    load_non_bn_state_dict(model, msg.content["arrays"].to_torch_state_dict())
+    _restore_bn_from_cache(model)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model = maybe_compile_model(

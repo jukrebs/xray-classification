@@ -8,6 +8,7 @@ from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 
 from berlin25_xray.task import Net
+from berlin25_xray.fedbn import get_non_bn_state_dict
 from berlin25_xray.util import (
     compute_aggregated_metrics,
     log_eval_metrics,
@@ -44,9 +45,9 @@ def main(grid: Grid, context: Context) -> None:
     log(INFO, "Wandb initialized with run_id: %s", wandb.run.id)
 
     global_model = Net(image_size=image_size)
-    arrays = ArrayRecord(global_model.state_dict())
+    arrays = ArrayRecord(get_non_bn_state_dict(global_model))
 
-    strategy = HackathonFedAvg(fraction_train=1, run_name=run_name)
+    strategy = HackathonFedBN(fraction_train=1, run_name=run_name)
     result = strategy.start(
         grid=grid,
         initial_arrays=arrays,
@@ -59,8 +60,8 @@ def main(grid: Grid, context: Context) -> None:
     log(INFO, "Wandb run finished")
 
 
-class HackathonFedAvg(FedAvg):
-    """FedAvg strategy that logs metrics and saves best model to W&B."""
+class HackathonFedBN(FedAvg):
+    """FedBN-style strategy that logs metrics and saves best model to W&B."""
 
     def __init__(self, *args, run_name=None, **kwargs):
         super().__init__(*args, **kwargs)
