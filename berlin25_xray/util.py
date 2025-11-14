@@ -5,6 +5,7 @@ to log additional metrics or save models based on different criteria.
 """
 
 import logging
+import math
 import os
 import warnings
 from collections.abc import Mapping
@@ -192,7 +193,18 @@ def save_best_model(arrays, agg_metrics, server_round, run_name, best_auroc_trac
 
     Returns updated best_auroc_tracker dict with 'auroc' key.
     """
-    current_auroc = agg_metrics["roc_auc"]
+    raw_auroc = agg_metrics["roc_auc"]
+    try:
+        current_auroc = float(raw_auroc)
+    except (TypeError, ValueError):
+        current_auroc = float("nan")
+
+    if math.isnan(current_auroc):
+        logger.warning(
+            "Skipping model save for round %s because aggregated AUROC is NaN.",
+            server_round,
+        )
+        return False, "  Model not saved (AUROC unavailable)"
 
     if (
         best_auroc_tracker.get("auroc") is None

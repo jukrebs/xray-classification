@@ -19,6 +19,12 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_compiled_model(model):
+    """Return the original nn.Module even if torch.compile wrapped it."""
+
+    return getattr(model, "_orig_mod", model)
+
+
 @app.train()
 def train(msg: Message, context: Context):
     """Train the model on local data."""
@@ -86,7 +92,8 @@ def train(msg: Message, context: Context):
     log_gpu_utilization(logger, device, prefix="Client/train/done")
 
     # Construct and return reply Message
-    model_record = ArrayRecord(model.state_dict())
+    state_src = _unwrap_compiled_model(model)
+    model_record = ArrayRecord(state_src.state_dict())
     metrics = {
         "partition-id": context.node_config["partition-id"],
         "train_loss": train_loss,
