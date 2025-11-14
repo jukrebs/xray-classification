@@ -45,7 +45,7 @@ clientapp = "berlin25_xray.client_app:app"
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
 image-size = 224        # Use high-res 224px preprocessing for DenseNet
-batch-size = 4096       # 192GB GPU can handle very large dense batches safely
+batch-size = 1024      # Keeps GPU memory comfortable while still leveraging large batches
 num-server-rounds = 8
 local-epochs = 2
 lr = 0.0001             # Works well for full DenseNet fine-tuning
