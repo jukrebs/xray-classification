@@ -30,6 +30,10 @@ DEFAULT_IMAGE_SIZE = 128
 DEFAULT_BATCH_SIZE = 16
 DEFAULT_EVAL_BATCH_SIZE = 32
 
+# CXformer tuning hyperparameters
+CXFORMER_TUNE_LAST_N_LAYERS = 2
+CXFORMER_BACKBONE_LR_SCALE = 0.1  # backbone LR = head LR * scale
+
 PARTITION_HOSPITAL_MAP = {
     0: "A",
     1: "B",
@@ -55,9 +59,19 @@ class Net(nn.Module):
         # Load CXformer backbone (DINOv2-with-registers variant), pretrained on chest X-rays.
         self.backbone = AutoModel.from_pretrained(self.model_name)
 
-        # Freeze backbone parameters (we'll only train the small head ensemble).
+        # Freeze backbone parameters by default.
         for p in self.backbone.parameters():
             p.requires_grad = False
+
+        # Optionally unfreeze the last few transformer blocks for light finetuning.
+        encoder = getattr(self.backbone, "encoder", None)
+        layers = getattr(encoder, "layer", None) if encoder is not None else None
+        if isinstance(layers, torch.nn.ModuleList) and layers:
+            n_layers = len(layers)
+            n_tune = min(CXFORMER_TUNE_LAST_N_LAYERS, n_layers)
+            for idx in range(n_layers - n_tune, n_layers):
+                for p in layers[idx].parameters():
+                    p.requires_grad = True
 
         # Hidden size comes from the config (typically 768).
         hidden_dim = self.backbone.config.hidden_size
@@ -102,6 +116,31 @@ class Net(nn.Module):
         logits = torch.stack(head_logits, dim=-1).mean(dim=-1)
 
         return logits  # BCEWithLogitsLoss expects raw logits
+
+
+def _build_optimizer(model: nn.Module, lr: float):
+    """Create an optimizer with param groups when using CXformer backbone."""
+
+    # Special handling for CXformer-based Net: separate head and backbone params.
+    if isinstance(model, Net):
+        head_params = list(model.heads.parameters())
+        backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
+
+        param_groups = []
+        if head_params:
+            param_groups.append({"params": head_params, "lr": lr})
+        if backbone_params:
+            param_groups.append(
+                {
+                    "params": backbone_params,
+                    "lr": lr * CXFORMER_BACKBONE_LR_SCALE,
+                }
+            )
+        return torch.optim.Adam(param_groups)
+
+    # Fallback: single parameter group for any other model.
+    params = (p for p in model.parameters() if p.requires_grad)
+    return torch.optim.Adam(params, lr=lr)
 
 
 def maybe_compile_model(model: nn.Module, *, mode: str, enabled: bool = True) -> nn.Module:
@@ -265,8 +304,7 @@ def dataset_name_from_partition(partition_id: int) -> str:
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    params = (p for p in net.parameters() if p.requires_grad)
-    optimizer = torch.optim.Adam(params, lr=lr)
+    optimizer = _build_optimizer(net, lr)
     device_type = device.type
     use_amp = device_type == "cuda"
     try:
