@@ -6,15 +6,21 @@ import torch
 from sklearn.metrics import roc_auc_score
 
 from berlin25_xray.logging_utils import configure_logging, log_gpu_utilization, log_timing
-from berlin25_xray.task import Net, compute_metrics_from_confusion_matrix, load_data
+from berlin25_xray.task import (
+    Net,
+    compute_metrics_from_confusion_matrix,
+    load_data,
+    maybe_compile_model,
+)
 from berlin25_xray.task import test as test_fn
 from berlin25_xray.task import train as train_fn
 
 HOSPITAL = "A"  # A, B, or C
 EPOCHS = 3
 LEARNING_RATE = 1e-4
-BATCH_SIZE = 512
-IMAGE_SIZE = 224
+BATCH_SIZE = 1024
+IMAGE_SIZE = 128
+COMPILE_MODEL = True
 
 
 configure_logging()
@@ -25,13 +31,17 @@ def main():
     """Train X-ray classifier locally on a specific hospital's data."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(
-        "Starting local training | hospital=%s | epochs=%d | lr=%.0e | batch=%d | image=%d | device=%s",
+        (
+            "Starting local training | hospital=%s | epochs=%d | lr=%.0e | "
+            "batch=%d | image=%d | device=%s | compile=%s"
+        ),
         HOSPITAL,
         EPOCHS,
         LEARNING_RATE,
         BATCH_SIZE,
         IMAGE_SIZE,
         device,
+        COMPILE_MODEL,
     )
     log_gpu_utilization(logger, device, prefix="Local/device")
 
@@ -66,6 +76,7 @@ def main():
     log_gpu_utilization(logger, device, prefix="Local/post-dataload")
 
     model = Net().to(device)
+    model = maybe_compile_model(model, mode="local", enabled=COMPILE_MODEL)
     logger.info(
         "Starting model fine-tuning for %d epochs on %s",
         EPOCHS,

@@ -5,7 +5,12 @@ from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
 from berlin25_xray.logging_utils import configure_logging, log_gpu_utilization, log_timing
-from berlin25_xray.task import PARTITION_HOSPITAL_MAP, Net, load_data
+from berlin25_xray.task import (
+    PARTITION_HOSPITAL_MAP,
+    Net,
+    load_data,
+    maybe_compile_model,
+)
 from berlin25_xray.task import test as test_fn
 from berlin25_xray.task import train as train_fn
 
@@ -24,6 +29,8 @@ def train(msg: Message, context: Context):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     logger.info("Starting client training on %s", device)
     model.to(device)
+    compile_model = bool(context.run_config.get("compile-model", True))
+    model = maybe_compile_model(model, mode="client-train", enabled=compile_model)
     log_gpu_utilization(logger, device, prefix="Client/train/device")
 
     # Load the data
@@ -96,6 +103,8 @@ def evaluate(msg: Message, context: Context):
     model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
+    compile_model = bool(context.run_config.get("compile-model", True))
+    model = maybe_compile_model(model, mode="client-eval", enabled=compile_model)
     logger.info("Starting client evaluation on %s", device)
     log_gpu_utilization(logger, device, prefix="Client/eval/device")
 

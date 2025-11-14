@@ -77,6 +77,31 @@ class Net(nn.Module):
         return self.vit(x)
 
 
+def maybe_compile_model(model: nn.Module, *, mode: str, enabled: bool = True) -> nn.Module:
+    """Best-effort torch.compile wrapper to squeeze more throughput out of ViT."""
+
+    if not enabled:
+        return model
+
+    compile_fn = getattr(torch, "compile", None)
+    if compile_fn is None:
+        logger.info("torch.compile unavailable; running %s model in eager mode", mode)
+        return model
+
+    try:
+        compiled_model = compile_fn(model)
+    except Exception as exc:  # pragma: no cover - backend specific
+        logger.warning(
+            "torch.compile failed for %s (falling back to eager): %s",
+            mode,
+            exc,
+        )
+        return model
+
+    logger.info("Enabled torch.compile for %s", mode)
+    return compiled_model
+
+
 def collate_preprocessed(batch):
     """Collate function for preprocessed data: Convert list of dicts to dict of batched tensors."""
     result = {}

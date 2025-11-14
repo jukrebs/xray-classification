@@ -44,11 +44,12 @@ clientapp = "berlin25_xray.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-image-size = 224        # ViT-B/16 input resolution
-batch-size = 512        # Larger batches keep throughput high for the frozen ViT head
+image-size = 128        # Smaller resolution cuts ViT token count for faster epochs
+batch-size = 1024       # Larger batches reduce optimizer steps without extra memory cost
 num-server-rounds = 1   # Single round (Hospital A only run)
 local-epochs = 10       # Equivalent to 10 total epochs per round
 lr = 0.0001             # Head-only finetuning LR
+compile-model = true    # Enable torch.compile for fused ViT execution
 
 # Default federation to use when running the app
 [tool.flwr.federations]
