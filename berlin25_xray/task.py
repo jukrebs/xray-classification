@@ -7,7 +7,7 @@ import torch.nn as nn
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoImageProcessor, AutoModel
+from transformers import AutoModel
 
 hospital_datasets = {}  # Cache loaded hospital datasets
 
@@ -17,30 +17,21 @@ CLASSIFIER_DIM = int(os.environ.get("CXFORMER_CLASSIFIER_DIM", "512"))
 CLASSIFIER_DROPOUT = float(os.environ.get("CXFORMER_CLASSIFIER_DROPOUT", "0.2"))
 
 
-@functools.lru_cache(maxsize=1)
-def get_image_processor():
-    """Load and cache the CXformer image processor once per process."""
-    return AutoImageProcessor.from_pretrained(DEFAULT_MODEL_NAME, trust_remote_code=True)
+def _preprocess_to_rgb(batch_x: torch.Tensor) -> torch.Tensor:
+    """Convert grayscale tensors to RGB and undo dataset normalization."""
+    if batch_x.ndim == 4 and batch_x.shape[1] == 1:
+        batch_x = batch_x.repeat(1, 3, 1, 1)
+    batch_x = (batch_x + 1.0) * 0.5  # undo (x - 0.5) / 0.5 normalization
+    return batch_x.clamp(0.0, 1.0)
 
 
-def _tensor_to_rgb_np(tensor: torch.Tensor) -> np.ndarray:
-    """Convert a tensor in CHW or HW format to float32 RGB numpy array."""
-    array = tensor.detach().cpu().numpy()
-    if array.ndim == 3:
-        array = np.moveaxis(array, 0, -1)
-    elif array.ndim == 2:
-        array = array[..., None]
-    if array.shape[-1] == 1:
-        array = np.repeat(array, 3, axis=-1)
-    return array.astype(np.float32, copy=False)
-
-
-def prepare_model_inputs(batch_x: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """Convert grayscale tensors to CXformer pixel values."""
-    processor = get_image_processor()
-    images = [_tensor_to_rgb_np(img) for img in batch_x]
-    processed = processor(images=images, return_tensors="pt")
-    return processed["pixel_values"].to(device)
+def prepare_model_inputs(batch_x: torch.Tensor, device: torch.device, resize_size: int, mean, std) -> torch.Tensor:
+    """Convert tensors to CXformer pixel values without relying on AutoImageProcessor."""
+    rgb = _preprocess_to_rgb(batch_x.to(device))
+    resized = torch.nn.functional.interpolate(rgb, size=(resize_size, resize_size), mode="bilinear", align_corners=False)
+    mean = torch.tensor(mean, device=device).view(1, 3, 1, 1)
+    std = torch.tensor(std, device=device).view(1, 3, 1, 1)
+    return (resized - mean) / std
 
 
 class Net(nn.Module):
@@ -50,6 +41,9 @@ class Net(nn.Module):
         super().__init__()
         self.encoder = AutoModel.from_pretrained(DEFAULT_MODEL_NAME, trust_remote_code=True)
         hidden_size = self.encoder.config.hidden_size
+        self._image_mean = getattr(self.encoder.config, "image_mean", [0.5, 0.5, 0.5])
+        self._image_std = getattr(self.encoder.config, "image_std", [0.5, 0.5, 0.5])
+        self._image_size = getattr(self.encoder.config, "image_size", 518)
         self.classifier = nn.Sequential(
             nn.LayerNorm(hidden_size),
             nn.Linear(hidden_size, CLASSIFIER_DIM),
@@ -121,7 +115,7 @@ def train(net, trainloader, epochs, lr, device):
     running_loss = 0.0
     for _ in range(epochs):
         for batch in tqdm(trainloader):
-            pixel_values = prepare_model_inputs(batch["x"], device)
+            pixel_values = prepare_model_inputs(batch["x"], device, net._image_size, net._image_mean, net._image_std)
             y = batch["y"].float().to(device)
             optimizer.zero_grad()
             outputs = net(pixel_values)
@@ -155,7 +149,7 @@ def test(net, testloader, device):
     all_labels = []
     with torch.no_grad():
         for batch in testloader:
-            pixel_values = prepare_model_inputs(batch["x"], device)
+            pixel_values = prepare_model_inputs(batch["x"], device, net._image_size, net._image_mean, net._image_std)
             y = batch["y"].float().to(device)
             outputs = net(pixel_values)
             loss = criterion(outputs, y)

@@ -22,7 +22,6 @@ dependencies = [
     "scipy",
     "scikit-learn",
     "wandb",
-    "opencv-python-headless>=4.9.0",
 
     # Analysis and visualization
     "jupyterlab",
