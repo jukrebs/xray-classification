@@ -44,7 +44,8 @@ clientapp = "berlin25_xray.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-image-size = 224        # ViT-B/16 pretraining resolution
+image-size = 224        # ViT-B/16 input resolution
+batch-size = 32         # Larger batches keep throughput high for the frozen ViT head
 num-server-rounds = 1   # Single round (Hospital A only run)
 local-epochs = 10       # Equivalent to 10 total epochs per round
 lr = 0.0001             # Head-only finetuning LR

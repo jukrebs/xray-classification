@@ -8,6 +8,7 @@ import torch.nn as nn
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from torchvision.models import ViT_B_16_Weights, vit_b_16
+from torch.cuda.amp import GradScaler, autocast
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
 
@@ -110,6 +111,7 @@ def load_data(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=4,
+        pin_memory=torch.cuda.is_available(),
         collate_fn=collate_preprocessed,
     )
     return dataloader
@@ -118,20 +120,26 @@ def load_data(
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    params = (p for p in net.parameters() if p.requires_grad)
+    optimizer = torch.optim.Adam(params, lr=lr)
+    use_amp = device.type == "cuda"
+    scaler = GradScaler(enabled=use_amp)
     net.train()
     running_loss = 0.0
+    total_steps = len(trainloader) * max(epochs, 1)
     for _ in range(epochs):
         for batch in tqdm(trainloader):
             x = batch["x"].to(device)
             y = batch["y"].to(device)
-            optimizer.zero_grad()
-            outputs = net(x)
-            loss = criterion(outputs, y)
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(enabled=use_amp):
+                outputs = net(x)
+                loss = criterion(outputs, y)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss += loss.item()
-    avg_loss = running_loss / (len(trainloader) * epochs)
+    avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
     return avg_loss
 
 
