@@ -8,8 +8,8 @@ from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 
-from berlin25_xray.task import Net
-from berlin25_xray.util import (
+from cold_start_hackathon.task import Net
+from cold_start_hackathon.util import (
     compute_aggregated_metrics,
     log_training_metrics,
     log_eval_metrics,
@@ -24,7 +24,6 @@ from berlin25_xray.util import (
 # If all W&B config is None/unset, W&B logging will be disabled
 WANDB_API_KEY = os.environ.get("WANDB_API_KEY", None)  # Your W&B API key
 WANDB_PROJECT = os.environ.get("WANDB_PROJECT", None)  # Your W&B project name
-WANDB_ENTITY = os.environ.get("WANDB_ENTITY", None)  # Optional entity/org name
 # ============================================================================
 
 app = ServerApp()
@@ -50,7 +49,6 @@ def main(grid: Grid, context: Context) -> None:
         log(INFO, "Wandb login successful")
         wandb.init(
             project=WANDB_PROJECT,
-            entity=WANDB_ENTITY,
             name=run_name,
             config={
                 "num_rounds": num_rounds,

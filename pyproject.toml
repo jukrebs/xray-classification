@@ -39,8 +39,8 @@ publisher = "hackathon"
 
 # Point to your ServerApp and ClientApp objects
 [tool.flwr.app.components]
-serverapp = "berlin25_xray.server_app:app"
-clientapp = "berlin25_xray.client_app:app"
+serverapp = "cold_start_hackathon.server_app:app"
+clientapp = "cold_start_hackathon.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
@@ -61,12 +61,6 @@ options.num-supernodes = 3
 options.num-supernodes = 3
 options.backend.client-resources.num-cpus = 2
 options.backend.client-resources.num-gpus = 0.33
-
-[tool.flwr.federations.cluster]
-options.num-supernodes = 3
-options.backend.client-resources.num-cpus = 2
-options.backend.client-resources.num-gpus = 0.33
-
 
 [tool.flwr.federations.cluster-cpu]
 options.num-supernodes = 3

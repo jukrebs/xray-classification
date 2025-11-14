@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from sklearn.metrics import roc_auc_score
 
-from berlin25_xray.task import Net, load_data, test
+from cold_start_hackathon.task import Net, load_data, test
 
 # Model path: update with your best model filename from ~/models/
 # Example: MODEL_PATH = f"/home/team00/models/job_123456_round5_auroc8234.pt"

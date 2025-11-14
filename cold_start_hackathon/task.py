@@ -1,4 +1,3 @@
-import functools
 import os
 
 import numpy as np
@@ -6,59 +5,33 @@ import torch
 import torch.nn as nn
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
+from torchvision import models
 from tqdm import tqdm
-from transformers import AutoModel
 
 hospital_datasets = {}  # Cache loaded hospital datasets
 
-DEFAULT_MODEL_NAME = os.environ.get("CXFORMER_MODEL_NAME", "m42-health/CXformer-base")
-FREEZE_ENCODER = os.environ.get("CXFORMER_FREEZE_ENCODER", "1").lower() not in {"0", "false", "no"}
-CLASSIFIER_DIM = int(os.environ.get("CXFORMER_CLASSIFIER_DIM", "512"))
-CLASSIFIER_DROPOUT = float(os.environ.get("CXFORMER_CLASSIFIER_DROPOUT", "0.2"))
-
-
-def _preprocess_to_rgb(batch_x: torch.Tensor) -> torch.Tensor:
-    """Convert grayscale tensors to RGB and undo dataset normalization."""
-    if batch_x.ndim == 4 and batch_x.shape[1] == 1:
-        batch_x = batch_x.repeat(1, 3, 1, 1)
-    batch_x = (batch_x + 1.0) * 0.5  # undo (x - 0.5) / 0.5 normalization
-    return batch_x.clamp(0.0, 1.0)
-
-
-def prepare_model_inputs(batch_x: torch.Tensor, device: torch.device, resize_size: int, mean, std) -> torch.Tensor:
-    """Convert tensors to CXformer pixel values without relying on AutoImageProcessor."""
-    rgb = _preprocess_to_rgb(batch_x.to(device))
-    resized = torch.nn.functional.interpolate(rgb, size=(resize_size, resize_size), mode="bilinear", align_corners=False)
-    mean = torch.tensor(mean, device=device).view(1, 3, 1, 1)
-    std = torch.tensor(std, device=device).view(1, 3, 1, 1)
-    return (resized - mean) / std
-
 
 class Net(nn.Module):
-    """CXformer encoder plus a lightweight binary classification head."""
+    """Starting point: ResNet18-based model for binary chest X-ray classification."""
 
     def __init__(self):
-        super().__init__()
-        self.encoder = AutoModel.from_pretrained(DEFAULT_MODEL_NAME, trust_remote_code=True)
-        hidden_size = self.encoder.config.hidden_size
-        self._image_mean = getattr(self.encoder.config, "image_mean", [0.5, 0.5, 0.5])
-        self._image_std = getattr(self.encoder.config, "image_std", [0.5, 0.5, 0.5])
-        self._image_size = getattr(self.encoder.config, "image_size", 518)
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, CLASSIFIER_DIM),
-            nn.GELU(),
-            nn.Dropout(CLASSIFIER_DROPOUT),
-            nn.Linear(CLASSIFIER_DIM, 1),
+        super(Net, self).__init__()
+        self.model = models.resnet18(weights=None)
+        # Adapt to grayscale input
+        self.model.conv1 = nn.Conv2d(
+            in_channels=1,
+            out_channels=64,
+            kernel_size=7,
+            stride=2,
+            padding=3,
+            bias=False,
         )
-        if FREEZE_ENCODER:
-            for param in self.encoder.parameters():
-                param.requires_grad = False
+        # Binary classification head (single logit)
+        in_features = self.model.fc.in_features
+        self.model.fc = nn.Linear(in_features, 1)
 
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        outputs = self.encoder(pixel_values=pixel_values)
-        cls_token = outputs.last_hidden_state[:, 0]
-        return self.classifier(cls_token)
+    def forward(self, x):
+        return self.model(x)  # No sigmoid, using BCEWithLogitsLoss
 
 
 def collate_preprocessed(batch):
@@ -67,7 +40,7 @@ def collate_preprocessed(batch):
     for key in batch[0].keys():
         if key in ["x", "y"]:
             # Convert lists to tensors and stack
-            result[key] = torch.stack([torch.as_tensor(item[key], dtype=torch.float32) for item in batch])
+            result[key] = torch.stack([torch.tensor(item[key]) for item in batch])
         else:
             # Keep other fields as lists
             result[key] = [item[key] for item in batch]
@@ -78,7 +51,7 @@ def load_data(
     dataset_name: str,
     split_name: str,
     image_size: int = 128,
-    batch_size: int = 1024,
+    batch_size: int = 16,
 ):
     """Load hospital X-ray data.
 
@@ -110,15 +83,15 @@ def load_data(
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=1e-2)
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
         for batch in tqdm(trainloader):
-            pixel_values = prepare_model_inputs(batch["x"], device, net._image_size, net._image_mean, net._image_std)
-            y = batch["y"].float().to(device)
+            x = batch["x"].to(device)
+            y = batch["y"].to(device)
             optimizer.zero_grad()
-            outputs = net(pixel_values)
+            outputs = net(x)
             loss = criterion(outputs, y)
             loss.backward()
             optimizer.step()
@@ -149,9 +122,9 @@ def test(net, testloader, device):
     all_labels = []
     with torch.no_grad():
         for batch in testloader:
-            pixel_values = prepare_model_inputs(batch["x"], device, net._image_size, net._image_mean, net._image_std)
-            y = batch["y"].float().to(device)
-            outputs = net(pixel_values)
+            x = batch["x"].to(device)
+            y = batch["y"].to(device)
+            outputs = net(x)
             loss = criterion(outputs, y)
             total_loss += loss.item()
 
