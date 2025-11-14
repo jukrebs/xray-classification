@@ -46,10 +46,11 @@ def main(grid: Grid, context: Context) -> None:
 
     strategy = HackathonFedAvg(
         fraction_train=1,
+        fraction_evaluate=1,
         run_name=run_name,
-        min_fit_clients=1,
-        min_available_clients=1,
-        min_evaluate_clients=1,
+        min_train_nodes=1,
+        min_available_nodes=1,
+        min_evaluate_nodes=1,
     )
     result = strategy.start(
         grid=grid,
