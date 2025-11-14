@@ -34,6 +34,7 @@ def main(grid: Grid, context: Context) -> None:
     wandb.init(
         project="hackathon",
         entity="justus-krebs-technische-universit-t-berlin",
+        name=run_name,
         config={
             "num_rounds": num_rounds,
             "learning_rate": lr,
