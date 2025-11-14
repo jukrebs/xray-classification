@@ -31,7 +31,8 @@ def main(grid: Grid, context: Context) -> None:
     wandb.login()
     log(INFO, "Wandb login successful")
     wandb.init(
-        name=run_name,
+        project="hackathon",
+        entity="justus-krebs-technische-universit-t-berlin",
         config={
             "num_rounds": num_rounds,
             "learning_rate": lr,
