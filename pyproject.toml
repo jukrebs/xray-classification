@@ -66,4 +66,4 @@ enable-account-auth = true
 # Cluster deployment limited to one supernode (Hospital A only)
 options.num-supernodes = 1
 options.backend.client-resources.num-cpus = 4
-options.backend.client-resources.num-gpus = 0.33
+options.backend.client-resources.num-gpus = 1
