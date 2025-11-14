@@ -1,6 +1,7 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
 import logging
+import math
 import multiprocessing as mp
 import os
 import time
@@ -50,15 +51,21 @@ def _configure_torch_backends():
         torch.set_float32_matmul_precision("medium")
     except Exception:  # pragma: no cover - torch version dependent
         pass
-    try:
-        torch.backends.cudnn.benchmark = True
-    except Exception:  # pragma: no cover - backend might be missing
-        pass
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-    except Exception:  # pragma: no cover - CPU only or old torch
-        pass
+    if not IS_ROCM:
+        try:
+            torch.backends.cudnn.benchmark = True
+        except Exception:  # pragma: no cover - backend might be missing
+            pass
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        except Exception:  # pragma: no cover - CPU only or old torch
+            pass
+    else:
+        try:
+            torch.backends.cudnn.benchmark = False
+        except Exception:
+            pass
 
 
 _configure_torch_backends()
@@ -454,28 +461,59 @@ def train(net, trainloader, epochs, lr, device):
     )
     log_gpu_utilization(logger, device, prefix="Train/start")
     train_start = time.perf_counter()
+    micro_batch_cap = 256
     for epoch in range(epochs):
         epoch_loss = 0.0
         epoch_start = time.perf_counter()
         progress = tqdm(trainloader, desc=f"Epoch {epoch + 1}/{epochs}")
         for batch in progress:
             x, y = _move_batch_to_device(batch, device)
+            batch_size = x.shape[0]
             optimizer.zero_grad(set_to_none=True)
-            try:
-                autocast_ctx = amp.autocast(device_type=device_type, enabled=use_amp)
-            except TypeError:
+
+            # On ROCm, avoid very large physical batches by splitting into
+            # smaller micro-batches while keeping the effective batch size
+            # identical for optimization.
+            if IS_ROCM and batch_size > micro_batch_cap:
+                global_batch = float(batch_size)
+                batch_loss_value = 0.0
+                for start in range(0, batch_size, micro_batch_cap):
+                    end = min(start + micro_batch_cap, batch_size)
+                    x_mb = x[start:end]
+                    y_mb = y[start:end]
+                    weight = (end - start) / global_batch
+                    try:
+                        autocast_ctx = amp.autocast(device_type=device_type, enabled=use_amp)
+                    except TypeError:
+                        try:
+                            autocast_ctx = amp.autocast(device=device_type, enabled=use_amp)
+                        except TypeError:
+                            autocast_ctx = amp.autocast(enabled=use_amp)
+                    with autocast_ctx:
+                        loss_mb = criterion(net(x_mb), y_mb)
+                        scaled_loss = loss_mb * weight
+                    batch_loss_value += loss_mb.item() * weight
+                    scaler.scale(scaled_loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                running_loss += batch_loss_value
+                epoch_loss += batch_loss_value
+            else:
                 try:
-                    autocast_ctx = amp.autocast(device=device_type, enabled=use_amp)
+                    autocast_ctx = amp.autocast(device_type=device_type, enabled=use_amp)
                 except TypeError:
-                    autocast_ctx = amp.autocast(enabled=use_amp)
-            with autocast_ctx:
-                outputs = net(x)
-                loss = criterion(outputs, y)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            running_loss += loss.item()
-            epoch_loss += loss.item()
+                    try:
+                        autocast_ctx = amp.autocast(device=device_type, enabled=use_amp)
+                    except TypeError:
+                        autocast_ctx = amp.autocast(enabled=use_amp)
+                with autocast_ctx:
+                    outputs = net(x)
+                    loss = criterion(outputs, y)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                running_loss += loss.item()
+                epoch_loss += loss.item()
         epoch_duration = time.perf_counter() - epoch_start
         avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
         logger.info(

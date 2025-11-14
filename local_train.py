@@ -24,7 +24,7 @@ class LocalTrainingConfig:
     hospital: str = "A"
     epochs: int = 3
     learning_rate: float = 1e-4
-    batch_size: int = 1024
+    batch_size: int = 256
     image_size: int = 128
     compile_model: bool = True
 
