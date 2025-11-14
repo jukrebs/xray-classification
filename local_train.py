@@ -23,10 +23,10 @@ class LocalTrainingConfig:
 
     hospital: str = "A"
     epochs: int = 3
-    learning_rate: float = 1e-4
+    learning_rate: float = 3e-4
     batch_size: int = 1024
     image_size: int = 128
-    compile_model: bool = True
+    compile_model: bool = False
 
     @property
     def dataset_name(self) -> str:

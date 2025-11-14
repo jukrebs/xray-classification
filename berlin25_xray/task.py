@@ -16,7 +16,15 @@ try:
 except ImportError:  # pragma: no cover - fallback for older runtimes
     from torch.cuda import amp  # type: ignore
 from torch.utils.data import DataLoader
-from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
+import torchvision.transforms.functional as TF
+from torchvision.transforms import (
+    Compose,
+    Grayscale,
+    InterpolationMode,
+    Normalize,
+    Resize,
+    ToTensor,
+)
 from tqdm import tqdm
 
 from berlin25_xray.logging_utils import (
@@ -144,11 +152,55 @@ def _build_optimizer(model: nn.Module, lr: float):
                     "lr": lr * CXFORMER_BACKBONE_LR_SCALE,
                 }
             )
-        return torch.optim.Adam(param_groups)
+        return torch.optim.AdamW(param_groups, weight_decay=0.01)
 
     # Fallback: single parameter group for any other model.
     params = (p for p in model.parameters() if p.requires_grad)
-    return torch.optim.Adam(params, lr=lr)
+    return torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
+
+
+def _compute_pos_weight(trainloader, device):
+    """Estimate positive class weight for BCE loss from the training data."""
+
+    try:
+        ys = trainloader.dataset["y"]
+        labels = torch.as_tensor(ys).view(-1)
+        num_pos = (labels >= 0.5).sum().item()
+        num_neg = (labels < 0.5).sum().item()
+        if num_pos == 0:
+            pos_weight_val = 1.0
+        else:
+            pos_weight_val = num_neg / num_pos
+        logger.info(
+            "Computed pos_weight for BCE: %.4f (pos=%d, neg=%d)",
+            pos_weight_val,
+            num_pos,
+            num_neg,
+        )
+        return torch.tensor([pos_weight_val], device=device)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Falling back to pos_weight=1.0 due to error: %s", exc)
+        return torch.tensor([1.0], device=device)
+
+
+def _augment_batch(x: torch.Tensor) -> torch.Tensor:
+    """On-the-fly GPU-friendly augmentation for chest X-ray tensors in [-1, 1]."""
+
+    # Random horizontal flip
+    if torch.rand(1, device=x.device) < 0.5:
+        x = torch.flip(x, dims=[3])
+
+    # Small random rotation (±5 degrees)
+    if torch.rand(1, device=x.device) < 0.3:
+        angle = float(torch.empty(1, device=x.device).uniform_(-5.0, 5.0))
+        x = TF.rotate(
+            x,
+            angle=angle,
+            interpolation=InterpolationMode.BILINEAR,
+            fill=0.0,
+        )
+
+    return x
 
 
 def maybe_compile_model(model: nn.Module, *, mode: str, enabled: bool = True) -> nn.Module:
@@ -311,7 +363,8 @@ def dataset_name_from_partition(partition_id: int) -> str:
 
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    criterion = torch.nn.BCEWithLogitsLoss().to(device)
+    pos_weight = _compute_pos_weight(trainloader, device)
+    criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(device)
     optimizer = _build_optimizer(net, lr)
     device_type = device.type
     use_amp = device_type == "cuda"
@@ -345,6 +398,7 @@ def train(net, trainloader, epochs, lr, device):
         for batch in progress:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
+            x = _augment_batch(x)
             optimizer.zero_grad(set_to_none=True)
             try:
                 autocast_ctx = amp.autocast(device_type=device_type, enabled=use_amp)

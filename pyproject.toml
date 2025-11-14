@@ -49,8 +49,8 @@ image-size = 128        # Smaller resolution cuts ViT token count for faster epo
 batch-size = 1024       # Larger batches reduce optimizer steps without extra memory cost
 num-server-rounds = 3   # More rounds for CXformer finetuning
 local-epochs = 5        # 3 x 5 = 15 effective local epochs
-lr = 0.0001             # Head-only finetuning LR
-compile-model = true    # Enable torch.compile for fused ViT execution
+lr = 0.0003             # Slightly higher LR for CXformer head/backbone finetuning
+compile-model = false   # Disable torch.compile to save time on MI300X
 
 # Default federation to use when running the app
 [tool.flwr.federations]
