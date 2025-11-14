@@ -46,8 +46,8 @@ clientapp = "berlin25_xray.client_app:app"
 [tool.flwr.app.config]
 image-size = 128        # Image size (128 or 224)
 batch-size = 1024       # Larger batches reduce optimizer steps without extra memory cost
-num-server-rounds = 100 # Slurm processes are capped to 15min
-local-epochs = 1
+num-server-rounds = 5
+local-epochs = 2
 lr = 0.0001             # Head-only finetuning LR
 compile-model = true    # Enable torch.compile for fused ViT execution
 
