@@ -1,4 +1,4 @@
-import os
+import subprocess
 from logging import INFO
 
 import wandb
@@ -24,8 +24,17 @@ def main(grid: Grid, context: Context) -> None:
     lr: float = context.run_config["lr"]
     local_epochs: int = context.run_config["local-epochs"]
 
-    # Get run name from environment variable (set by submit_job.sh). Feel free to change this.
-    run_name = os.environ.get("JOB_NAME", "your_custom_run_name")
+    # Derive run name from current git branch and short commit
+    def git_cmd(args):
+        return subprocess.check_output(["git"] + args).decode("utf-8").strip()
+
+    try:
+        branch = git_cmd(["rev-parse", "--abbrev-ref", "HEAD"])
+        commit = git_cmd(["rev-parse", "--short", "HEAD"])
+    except Exception:
+        branch, commit = "unknown", "unknown"
+
+    run_name = f"{branch}-{commit}"
 
     # W&B auth and project/entity are configured via environment variables
     wandb.login()
@@ -33,11 +42,15 @@ def main(grid: Grid, context: Context) -> None:
     wandb.init(
         project="hackathon",
         entity="justus-krebs-technische-universit-t-berlin",
+        name=run_name,
         config={
             "num_rounds": num_rounds,
             "learning_rate": lr,
             "local_epochs": local_epochs,
+            "git_branch": branch,
+            "git_commit": commit,
         },
+        tags=[branch, commit],
     )
     log(INFO, "Wandb initialized with run_id: %s", wandb.run.id)
 
@@ -45,7 +58,7 @@ def main(grid: Grid, context: Context) -> None:
     arrays = ArrayRecord(global_model.state_dict())
 
     strategy = HackathonFedAvg(fraction_train=1, run_name=run_name)
-    result = strategy.start(
+    strategy.start(
         grid=grid,
         initial_arrays=arrays,
         train_config=ConfigRecord({"lr": lr}),
