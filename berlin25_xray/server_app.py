@@ -8,8 +8,8 @@ from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 
-from cold_start_hackathon.task import Net
-from cold_start_hackathon.util import (
+from berlin25_xray.task import Net
+from berlin25_xray.util import (
     compute_aggregated_metrics,
     log_training_metrics,
     log_eval_metrics,
