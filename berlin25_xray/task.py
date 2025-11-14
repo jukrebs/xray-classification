@@ -6,7 +6,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from datasets import load_from_disk
-from torch import amp
+try:
+    from torch import amp  # PyTorch >= 2.0 preferred API
+except ImportError:  # pragma: no cover - fallback for older runtimes
+    from torch.cuda import amp  # type: ignore
 from torch.utils.data import DataLoader
 from torchvision.models import ViT_B_16_Weights, vit_b_16
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
@@ -133,7 +136,13 @@ def train(net, trainloader, epochs, lr, device):
     optimizer = torch.optim.Adam(params, lr=lr)
     device_type = device.type
     use_amp = device_type == "cuda"
-    scaler = amp.GradScaler(device_type=device_type, enabled=use_amp)
+    try:
+        scaler = amp.GradScaler(device_type=device_type, enabled=use_amp)
+    except TypeError:
+        try:
+            scaler = amp.GradScaler(device=device_type, enabled=use_amp)
+        except TypeError:
+            scaler = amp.GradScaler(enabled=use_amp)
     net.train()
     running_loss = 0.0
     total_steps = len(trainloader) * max(epochs, 1)
@@ -142,7 +151,14 @@ def train(net, trainloader, epochs, lr, device):
             x = batch["x"].to(device)
             y = batch["y"].to(device)
             optimizer.zero_grad(set_to_none=True)
-            with amp.autocast(device_type=device_type, enabled=use_amp):
+            try:
+                autocast_ctx = amp.autocast(device_type=device_type, enabled=use_amp)
+            except TypeError:
+                try:
+                    autocast_ctx = amp.autocast(device=device_type, enabled=use_amp)
+                except TypeError:
+                    autocast_ctx = amp.autocast(enabled=use_amp)
+            with autocast_ctx:
                 outputs = net(x)
                 loss = criterion(outputs, y)
             scaler.scale(loss).backward()
