@@ -1,6 +1,7 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
 import logging
+import multiprocessing as mp
 import os
 import time
 from pathlib import Path
@@ -137,6 +138,9 @@ def maybe_compile_model(model: nn.Module, *, mode: str, enabled: bool = True) ->
     """Best-effort torch.compile wrapper to squeeze more throughput out of the model."""
 
     if not enabled:
+        return model
+    if IS_ROCM:
+        logger.info("torch.compile skipped for %s on ROCm (compile warmup too costly)", mode)
         return model
 
     compile_fn = getattr(torch, "compile", None)
@@ -338,7 +342,7 @@ def load_data(
         num_examples = len(data)
         shuffle = split_name == "train"  # shuffle only for training splits
         num_workers = _suggest_num_workers()
-        pin_memory = torch.cuda.is_available()
+        pin_memory = torch.cuda.is_available() and not IS_ROCM
         loader_kwargs = dict(
             dataset=data,
             batch_size=batch_size,
@@ -351,6 +355,10 @@ def load_data(
             loader_kwargs["persistent_workers"] = True
             prefetch_factor = max(2, min(8, max(1, batch_size // 32)))
             loader_kwargs["prefetch_factor"] = prefetch_factor
+            try:
+                loader_kwargs["multiprocessing_context"] = mp.get_context("spawn")
+            except ValueError:
+                logger.warning("Unable to set spawn multiprocessing context; using default.")
         dataloader = DataLoader(**loader_kwargs)
         class_stats = _compute_class_statistics(data)
         if class_stats:
