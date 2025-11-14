@@ -26,6 +26,11 @@ from berlin25_xray.logging_utils import (
     log_timing,
 )
 
+DATASET_ENV_VAR = "DATASET_DIR"
+DEFAULT_IMAGE_SIZE = 128
+DEFAULT_BATCH_SIZE = 16
+DEFAULT_EVAL_BATCH_SIZE = 32
+
 PARTITION_HOSPITAL_MAP = {
     0: "A",
     1: "B",
@@ -197,8 +202,8 @@ def _load_split_from_arrow(dataset_path: str, split_name: str):
 def load_data(
     dataset_name: str,
     split_name: str,
-    image_size: int = 128,
-    batch_size: int = 16,
+    image_size: int = DEFAULT_IMAGE_SIZE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ):
     """Load hospital X-ray data.
 
@@ -215,7 +220,7 @@ def load_data(
         image_size,
         batch_size,
     )
-    dataset_dir = os.environ["DATASET_DIR"]
+    dataset_dir = os.environ[DATASET_ENV_VAR]
 
     # Use preprocessed dataset based on image_size
     cache_key = f"{dataset_name}_{split_name}_{image_size}"
@@ -277,6 +282,16 @@ def load_data(
             shuffle,
         )
     return dataloader
+
+
+def dataset_name_from_partition(partition_id: int) -> str:
+    """Map a Flower partition id to the corresponding hospital dataset name."""
+
+    try:
+        hospital = PARTITION_HOSPITAL_MAP[int(partition_id)]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise KeyError(f"Unknown partition id: {partition_id}") from exc
+    return f"Hospital{hospital}"
 
 
 def train(net, trainloader, epochs, lr, device):

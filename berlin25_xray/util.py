@@ -16,8 +16,8 @@ import wandb
 from sklearn.metrics import roc_auc_score
 
 from berlin25_xray.task import (
-    PARTITION_HOSPITAL_MAP,
     compute_metrics_from_confusion_matrix,
+    dataset_name_from_partition,
 )
 
 # Suppress protobuf deprecation warnings
@@ -128,7 +128,7 @@ def log_training_metrics(replies, server_round):
             logger.warning("Skipping train reply missing partition or train_loss metric.")
             continue
         try:
-            hospital = f"Hospital{PARTITION_HOSPITAL_MAP[int(partition_id)]}"
+            hospital = dataset_name_from_partition(int(partition_id))
         except (KeyError, TypeError, ValueError):
             logger.warning(
                 "Skipping train reply due to unknown partition-id value: %s", partition_id
@@ -159,7 +159,7 @@ def log_eval_metrics(replies, agg_metrics, server_round, weighted_by_key, log_fn
             logger.warning("Skipping evaluation reply missing partition-id.")
             continue
         try:
-            hospital = f"Hospital{PARTITION_HOSPITAL_MAP[int(partition_id)]}"
+            hospital = dataset_name_from_partition(int(partition_id))
         except (KeyError, TypeError, ValueError):
             logger.warning(
                 "Skipping evaluation reply due to unknown partition-id value: %s",
