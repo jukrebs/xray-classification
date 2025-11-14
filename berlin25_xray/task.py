@@ -1,7 +1,6 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
 import logging
-import math
 import os
 import time
 from pathlib import Path
@@ -9,14 +8,13 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets, load_from_disk
 try:
     from torch import amp  # PyTorch >= 2.0 preferred API
 except ImportError:  # pragma: no cover - fallback for older runtimes
     from torch.cuda import amp  # type: ignore
 from torch.utils.data import DataLoader
-from torchvision.models import ViT_B_16_Weights, vit_b_16
+from torchvision.models import DenseNet121_Weights, densenet121
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
 
@@ -44,100 +42,77 @@ logger = logging.getLogger(__name__)
 
 
 class Net(nn.Module):
-    """ViT-B/16-based model for binary chest X-ray classification (pretrained)."""
+    """DenseNet121 backbone with a lightweight X-ray specific classification head."""
 
-    def __init__(self, image_size: int = 224):
-        super(Net, self).__init__()
+    def __init__(
+        self,
+        image_size: int = 224,
+        head_hidden_dim: int = 256,
+        head_dropout: float = 0.2,
+    ):
+        super().__init__()
 
-        weights = ViT_B_16_Weights.IMAGENET1K_V1
         self.image_size = image_size
+        weights = DenseNet121_Weights.IMAGENET1K_V1
+        backbone = densenet121(weights=weights)
 
-        # Load ImageNet-pretrained ViT-B/16 at the requested resolution
-        self.vit = vit_b_16(weights=None, image_size=image_size)
-        state_dict = weights.get_state_dict(progress=False)
-        state_dict = _resize_vit_positional_embeddings(state_dict, self.vit, image_size)
-        # Drop the original classifier head weights so we can replace the head shape
-        state_dict.pop("heads.head.weight", None)
-        state_dict.pop("heads.head.bias", None)
-        missing, unexpected = self.vit.load_state_dict(state_dict, strict=False)
-        if unexpected:
-            logger.debug("Unexpected ViT weights skipped: %s", unexpected)
-        if missing:
-            logger.debug("Missing ViT weights (expected due to head swap): %s", missing)
+        # Adapt the first convolution to consume single-channel X-ray inputs by
+        # averaging the RGB kernels provided by the pretrained checkpoint.
+        conv0 = backbone.features.conv0
+        backbone.features.conv0 = nn.Conv2d(
+            1,
+            conv0.out_channels,
+            kernel_size=conv0.kernel_size,
+            stride=conv0.stride,
+            padding=conv0.padding,
+            bias=False,
+        )
+        with torch.no_grad():
+            backbone.features.conv0.weight.copy_(conv0.weight.mean(dim=1, keepdim=True))
 
-        in_features = self.vit.heads.head.in_features
-        self.vit.heads.head = nn.Linear(in_features, 1)
+        feature_dim = backbone.classifier.in_features
+        backbone.classifier = nn.Identity()
+        self.backbone = backbone
+        if head_hidden_dim and head_hidden_dim > 0:
+            self.head = nn.Sequential(
+                nn.Dropout(head_dropout),
+                nn.Linear(feature_dim, head_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(head_dropout),
+                nn.Linear(head_hidden_dim, 1),
+            )
+        else:
+            self.head = nn.Linear(feature_dim, 1)
 
-        # Freeze all parameters except the new head for a head-only finetune
-        for name, param in self.vit.named_parameters():
+        for param in self.backbone.parameters():
             param.requires_grad = False
-        for param in self.vit.heads.head.parameters():
+        for param in self.head.parameters():
             param.requires_grad = True
 
-        # Store ImageNet normalization stats so inputs match the pretrained backbone
-        # Fallback to standard ImageNet stats if torchvision doesn't expose them via weights.meta
         meta = getattr(weights, "meta", {}) or {}
         mean_vals = meta.get("mean", (0.485, 0.456, 0.406))
         std_vals = meta.get("std", (0.229, 0.224, 0.225))
-        mean = torch.tensor(mean_vals).view(1, 3, 1, 1)
-        std = torch.tensor(std_vals).view(1, 3, 1, 1)
+        grayscale_mean = float(sum(mean_vals) / len(mean_vals))
+        grayscale_std = float(sum(std_vals) / len(std_vals))
+        mean = torch.tensor(grayscale_mean).view(1, 1, 1, 1)
+        std = torch.tensor(grayscale_std).view(1, 1, 1, 1)
         self.register_buffer("imagenet_mean", mean, persistent=False)
         self.register_buffer("imagenet_std", std, persistent=False)
 
     def forward(self, x):
-        # ViT expects 3-channel inputs; repeat grayscale channel if needed
-        if x.shape[1] == 1:
-            x = x.repeat(1, 3, 1, 1)
+        if x.shape[1] == 3:
+            x = x.mean(dim=1, keepdim=True)
 
-        # Undo preprocessing (x was normalized with mean=0.5, std=0.5) and match ViT stats
+        # Undo preprocessing (x was normalized with mean=0.5, std=0.5) and match ImageNet stats
         x = x * 0.5 + 0.5  # Back to [0, 1]
         x = (x - self.imagenet_mean) / self.imagenet_std
 
-        return self.vit(x)
-
-
-def _resize_vit_positional_embeddings(state_dict, vit_model, target_image_size: int):
-    """Resize pretrained ViT positional embeddings when changing image resolution."""
-
-    pos_key = "encoder.pos_embedding"
-    if pos_key not in state_dict:
-        return state_dict
-
-    pretrained_pos = state_dict[pos_key]
-    current_pos = vit_model.encoder.pos_embedding
-    if pretrained_pos.shape == current_pos.shape:
-        return state_dict
-
-    num_patches = current_pos.shape[1] - 1
-    new_size = int(math.sqrt(num_patches))
-    cls_token = pretrained_pos[:, :1]
-    patch_tokens = pretrained_pos[:, 1:]
-    old_num_patches = patch_tokens.shape[1]
-    old_size = int(math.sqrt(old_num_patches))
-
-    logger.info(
-        "Resizing ViT positional embeddings from %dx%d to %dx%d for image_size=%d",
-        old_size,
-        old_size,
-        new_size,
-        new_size,
-        target_image_size,
-    )
-
-    patch_tokens = patch_tokens.reshape(1, old_size, old_size, -1).permute(0, 3, 1, 2)
-    patch_tokens = F.interpolate(
-        patch_tokens,
-        size=(new_size, new_size),
-        mode="bicubic",
-        align_corners=False,
-    )
-    patch_tokens = patch_tokens.permute(0, 2, 3, 1).reshape(1, new_size * new_size, -1)
-    state_dict[pos_key] = torch.cat([cls_token, patch_tokens], dim=1)
-    return state_dict
+        features = self.backbone(x)
+        return self.head(features)
 
 
 def maybe_compile_model(model: nn.Module, *, mode: str, enabled: bool = True) -> nn.Module:
-    """Best-effort torch.compile wrapper to squeeze more throughput out of ViT."""
+    """Best-effort torch.compile wrapper to squeeze more throughput out of the model."""
 
     if not enabled:
         return model
@@ -177,6 +152,51 @@ def collate_preprocessed(batch):
             # Keep other fields as lists
             result[key] = [item[key] for item in batch]
     return result
+
+
+def _compute_class_statistics(dataset):
+    """Return basic class statistics for BCE loss balancing."""
+    try:
+        labels_column = dataset["y"]
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Unable to access labels for class stats computation: %s", exc)
+        return None
+
+    if not labels_column:
+        return None
+
+    flattened = []
+    for label in labels_column:
+        if isinstance(label, torch.Tensor):
+            flattened.append(float(label.squeeze().item()))
+        elif isinstance(label, (list, tuple)):
+            if not label:
+                continue
+            flattened.append(float(label[0]))
+        elif isinstance(label, np.ndarray):
+            if label.size == 0:
+                continue
+            flattened.append(float(label.flat[0]))
+        else:
+            flattened.append(float(label))
+
+    total = len(flattened)
+    if total == 0:
+        return None
+
+    positives = float(np.sum(flattened))
+    negatives = float(total) - positives
+    pos_fraction = positives / float(total)
+    if positives == 0.0:
+        pos_weight = None
+    else:
+        pos_weight = negatives / positives if negatives > 0 else None
+    return {
+        "pos_fraction": pos_fraction,
+        "pos_weight": pos_weight,
+        "num_examples": total,
+        "num_positives": positives,
+    }
 
 
 def _load_split_from_arrow(dataset_path: str, split_name: str):
@@ -271,6 +291,18 @@ def load_data(
             loader_kwargs["persistent_workers"] = True
             loader_kwargs["prefetch_factor"] = 4
         dataloader = DataLoader(**loader_kwargs)
+        class_stats = _compute_class_statistics(data)
+        if class_stats:
+            setattr(dataloader, "class_stats", class_stats)
+            pos_pct = class_stats["pos_fraction"] * 100.0
+            pos_weight = class_stats["pos_weight"]
+            logger.info(
+                "Class distribution | dataset=%s/%s | positives=%.2f%% | pos_weight=%s",
+                dataset_name,
+                split_name,
+                pos_pct,
+                f"{pos_weight:.3f}" if pos_weight is not None else "n/a",
+            )
         num_batches = len(dataloader)
         logger.info(
             "Dataloader ready | dataset=%s/%s | samples=%d | batches=%d | workers=%d | shuffle=%s",
@@ -296,7 +328,21 @@ def dataset_name_from_partition(partition_id: int) -> str:
 
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    criterion = torch.nn.BCEWithLogitsLoss().to(device)
+    class_stats = getattr(trainloader, "class_stats", None)
+    pos_weight_value = None
+    if isinstance(class_stats, dict):
+        pos_weight_value = class_stats.get("pos_weight")
+        if pos_weight_value is not None and pos_weight_value <= 0:
+            pos_weight_value = None
+    if pos_weight_value is not None:
+        pos_weight_tensor = torch.tensor([pos_weight_value], device=device)
+        criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor).to(device)
+        logger.info(
+            "Using class-balanced BCEWithLogitsLoss | pos_weight=%.3f",
+            pos_weight_value,
+        )
+    else:
+        criterion = torch.nn.BCEWithLogitsLoss().to(device)
     params = (p for p in net.parameters() if p.requires_grad)
     optimizer = torch.optim.Adam(params, lr=lr)
     device_type = device.type
