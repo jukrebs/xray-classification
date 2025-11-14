@@ -75,7 +75,7 @@ def main():
     )
     log_gpu_utilization(logger, device, prefix="Local/post-dataload")
 
-    model = Net().to(device)
+    model = Net(image_size=IMAGE_SIZE).to(device)
     model = maybe_compile_model(model, mode="local", enabled=COMPILE_MODEL)
     logger.info(
         "Starting model fine-tuning for %d epochs on %s",

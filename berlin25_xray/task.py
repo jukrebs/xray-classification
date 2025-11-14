@@ -1,6 +1,7 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets, load_from_disk
 try:
     from torch import amp  # PyTorch >= 2.0 preferred API
@@ -39,13 +41,25 @@ logger = logging.getLogger(__name__)
 class Net(nn.Module):
     """ViT-B/16-based model for binary chest X-ray classification (pretrained)."""
 
-    def __init__(self):
+    def __init__(self, image_size: int = 224):
         super(Net, self).__init__()
 
         weights = ViT_B_16_Weights.IMAGENET1K_V1
+        self.image_size = image_size
 
-        # Load ImageNet-pretrained ViT-B/16 and replace classifier head with single logit
-        self.vit = vit_b_16(weights=weights)
+        # Load ImageNet-pretrained ViT-B/16 at the requested resolution
+        self.vit = vit_b_16(weights=None, image_size=image_size)
+        state_dict = weights.get_state_dict(progress=False)
+        state_dict = _resize_vit_positional_embeddings(state_dict, self.vit, image_size)
+        # Drop the original classifier head weights so we can replace the head shape
+        state_dict.pop("heads.head.weight", None)
+        state_dict.pop("heads.head.bias", None)
+        missing, unexpected = self.vit.load_state_dict(state_dict, strict=False)
+        if unexpected:
+            logger.debug("Unexpected ViT weights skipped: %s", unexpected)
+        if missing:
+            logger.debug("Missing ViT weights (expected due to head swap): %s", missing)
+
         in_features = self.vit.heads.head.in_features
         self.vit.heads.head = nn.Linear(in_features, 1)
 
@@ -75,6 +89,46 @@ class Net(nn.Module):
         x = (x - self.imagenet_mean) / self.imagenet_std
 
         return self.vit(x)
+
+
+def _resize_vit_positional_embeddings(state_dict, vit_model, target_image_size: int):
+    """Resize pretrained ViT positional embeddings when changing image resolution."""
+
+    pos_key = "encoder.pos_embedding"
+    if pos_key not in state_dict:
+        return state_dict
+
+    pretrained_pos = state_dict[pos_key]
+    current_pos = vit_model.encoder.pos_embedding
+    if pretrained_pos.shape == current_pos.shape:
+        return state_dict
+
+    num_patches = current_pos.shape[1] - 1
+    new_size = int(math.sqrt(num_patches))
+    cls_token = pretrained_pos[:, :1]
+    patch_tokens = pretrained_pos[:, 1:]
+    old_num_patches = patch_tokens.shape[1]
+    old_size = int(math.sqrt(old_num_patches))
+
+    logger.info(
+        "Resizing ViT positional embeddings from %dx%d to %dx%d for image_size=%d",
+        old_size,
+        old_size,
+        new_size,
+        new_size,
+        target_image_size,
+    )
+
+    patch_tokens = patch_tokens.reshape(1, old_size, old_size, -1).permute(0, 3, 1, 2)
+    patch_tokens = F.interpolate(
+        patch_tokens,
+        size=(new_size, new_size),
+        mode="bicubic",
+        align_corners=False,
+    )
+    patch_tokens = patch_tokens.permute(0, 2, 3, 1).reshape(1, new_size * new_size, -1)
+    state_dict[pos_key] = torch.cat([cls_token, patch_tokens], dim=1)
+    return state_dict
 
 
 def maybe_compile_model(model: nn.Module, *, mode: str, enabled: bool = True) -> nn.Module:

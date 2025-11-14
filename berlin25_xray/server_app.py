@@ -23,6 +23,7 @@ def main(grid: Grid, context: Context) -> None:
     num_rounds: int = context.run_config["num-server-rounds"]
     lr: float = context.run_config["lr"]
     local_epochs: int = context.run_config["local-epochs"]
+    image_size: int = context.run_config["image-size"]
 
     # Get run name from environment variable (set by submit_job.sh). Feel free to change this.
     run_name = os.environ.get("JOB_NAME", "your_custom_run_name")
@@ -37,11 +38,12 @@ def main(grid: Grid, context: Context) -> None:
             "num_rounds": num_rounds,
             "learning_rate": lr,
             "local_epochs": local_epochs,
+            "image_size": image_size,
         },
     )
     log(INFO, "Wandb initialized with run_id: %s", wandb.run.id)
 
-    global_model = Net()
+    global_model = Net(image_size=image_size)
     arrays = ArrayRecord(global_model.state_dict())
 
     strategy = HackathonFedAvg(

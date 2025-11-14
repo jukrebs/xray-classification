@@ -18,11 +18,12 @@ os.environ["WANDB_DIR"] = os.path.expanduser("~/.cache/wandb")
 # Format: "your-wandb-username/your-project-name/model-artifact-name:version"
 WANDB_MODEL_PATH = "justus-krebs-technische-universit-t-berlin/hackathon/vt:v0"
 DATASET_DIR = os.environ["DATASET_DIR"]
+IMAGE_SIZE = int(os.environ.get("XRAY_IMAGE_SIZE", 128))
 
 
 def evaluate_split(model, dataset_name, split_name, device):
     """Evaluate on any dataset split."""
-    loader = load_data(dataset_name, split_name, image_size=224, batch_size=32)
+    loader = load_data(dataset_name, split_name, image_size=IMAGE_SIZE, batch_size=32)
     _, _, _, _, _, probs, labels = test(model, loader, device)
     return roc_auc_score(labels, probs), len(loader.dataset)
 
@@ -38,7 +39,7 @@ def main():
     model_path = next(p for p in __import__("pathlib").Path(artifact_dir).glob("*.pt"))
 
     # Load model
-    model = Net()
+    model = Net(image_size=IMAGE_SIZE)
     model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
