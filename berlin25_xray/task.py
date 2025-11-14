@@ -6,9 +6,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from datasets import load_from_disk
+from torch import amp
 from torch.utils.data import DataLoader
 from torchvision.models import ViT_B_16_Weights, vit_b_16
-from torch.cuda.amp import GradScaler, autocast
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
 
@@ -65,10 +65,15 @@ class Net(nn.Module):
 def collate_preprocessed(batch):
     """Collate function for preprocessed data: Convert list of dicts to dict of batched tensors."""
     result = {}
+    tensor_keys = {"x", "y"}
     for key in batch[0].keys():
-        if key in ["x", "y"]:
-            # Convert lists back to tensors and stack
-            result[key] = torch.stack([torch.tensor(item[key]) for item in batch])
+        if key in tensor_keys:
+            first_value = batch[0][key]
+            if torch.is_tensor(first_value):
+                result[key] = torch.stack([item[key] for item in batch])
+            else:
+                arr = np.asarray([item[key] for item in batch], dtype=np.float32)
+                result[key] = torch.from_numpy(arr)
         else:
             # Keep other fields as lists
             result[key] = [item[key] for item in batch]
@@ -106,14 +111,18 @@ def load_data(
 
     data = hospital_datasets[cache_key]
     shuffle = split_name == "train"  # shuffle only for training splits
-    dataloader = DataLoader(
-        data,
+    loader_kwargs = dict(
+        dataset=data,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=4,
         pin_memory=torch.cuda.is_available(),
         collate_fn=collate_preprocessed,
     )
+    if loader_kwargs["num_workers"] > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 4
+    dataloader = DataLoader(**loader_kwargs)
     return dataloader
 
 
@@ -122,8 +131,9 @@ def train(net, trainloader, epochs, lr, device):
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
     params = (p for p in net.parameters() if p.requires_grad)
     optimizer = torch.optim.Adam(params, lr=lr)
-    use_amp = device.type == "cuda"
-    scaler = GradScaler(enabled=use_amp)
+    device_type = device.type
+    use_amp = device_type == "cuda"
+    scaler = amp.GradScaler(device_type=device_type, enabled=use_amp)
     net.train()
     running_loss = 0.0
     total_steps = len(trainloader) * max(epochs, 1)
@@ -132,7 +142,7 @@ def train(net, trainloader, epochs, lr, device):
             x = batch["x"].to(device)
             y = batch["y"].to(device)
             optimizer.zero_grad(set_to_none=True)
-            with autocast(enabled=use_amp):
+            with amp.autocast(device_type=device_type, enabled=use_amp):
                 outputs = net(x)
                 loss = criterion(outputs, y)
             scaler.scale(loss).backward()
