@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
-from torchvision import models
+from torchvision.models import ViT_B_16_Weights, vit_b_16
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
 
@@ -21,26 +21,40 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 
 class Net(nn.Module):
-    """Starting point: ResNet18-based model for binary chest X-ray classification."""
+    """ViT-B/16-based model for binary chest X-ray classification (pretrained)."""
 
     def __init__(self):
         super(Net, self).__init__()
-        self.model = models.resnet18(weights=None)
-        # Adapt to grayscale input
-        self.model.conv1 = nn.Conv2d(
-            in_channels=1,
-            out_channels=64,
-            kernel_size=7,
-            stride=2,
-            padding=3,
-            bias=False,
-        )
-        # Binary classification head (single logit)
-        in_features = self.model.fc.in_features
-        self.model.fc = nn.Linear(in_features, 1)
+
+        weights = ViT_B_16_Weights.IMAGENET1K_V1
+
+        # Load ImageNet-pretrained ViT-B/16 and replace classifier head with single logit
+        self.vit = vit_b_16(weights=weights)
+        in_features = self.vit.heads.head.in_features
+        self.vit.heads.head = nn.Linear(in_features, 1)
+
+        # Freeze all parameters except the new head for a head-only finetune
+        for name, param in self.vit.named_parameters():
+            param.requires_grad = False
+        for param in self.vit.heads.head.parameters():
+            param.requires_grad = True
+
+        # Store ImageNet normalization stats so inputs match the pretrained backbone
+        mean = torch.tensor(weights.meta["mean"]).view(1, 3, 1, 1)
+        std = torch.tensor(weights.meta["std"]).view(1, 3, 1, 1)
+        self.register_buffer("imagenet_mean", mean, persistent=False)
+        self.register_buffer("imagenet_std", std, persistent=False)
 
     def forward(self, x):
-        return self.model(x)  # No sigmoid, using BCEWithLogitsLoss
+        # ViT expects 3-channel inputs; repeat grayscale channel if needed
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+
+        # Undo preprocessing (x was normalized with mean=0.5, std=0.5) and match ViT stats
+        x = x * 0.5 + 0.5  # Back to [0, 1]
+        x = (x - self.imagenet_mean) / self.imagenet_std
+
+        return self.vit(x)
 
 
 def collate_preprocessed(batch):

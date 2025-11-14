@@ -1,60 +1,51 @@
-"""Local training script for testing the X-ray classification pipeline."""
+"""Local training script to sanity-check the ViT-B/16 baseline."""
 
 import torch
-from berlin25_xray.task import Net, load_data
+from sklearn.metrics import roc_auc_score
+
+from berlin25_xray.task import Net, compute_metrics_from_confusion_matrix, load_data
 from berlin25_xray.task import test as test_fn
 from berlin25_xray.task import train as train_fn
 
 HOSPITAL = "A"  # A, B, or C
 EPOCHS = 3
-LEARNING_RATE = 0.001
+LEARNING_RATE = 1e-4
 BATCH_SIZE = 16
-MAX_BATCHES = None  # For debugging, set to None to use all batches
+IMAGE_SIZE = 224
 
 
 def main():
     """Train X-ray classifier locally on a specific hospital's data."""
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    hospital_map = {"A": 0, "B": 1, "C": 2}
-    partition_id = hospital_map[HOSPITAL]
-
-    print(f"\nLoading Hospital{HOSPITAL} data...")
-    trainloader, evalloader = load_data(
-        partition_id,
-        batch_size=BATCH_SIZE,
-        max_batches=MAX_BATCHES,
-        preprocessed=True,
-    )
-
+    dataset_name = f"Hospital{HOSPITAL}"
+    print(f"\nLoading {dataset_name} data at {IMAGE_SIZE}x{IMAGE_SIZE} resolution...")
+    trainloader = load_data(dataset_name, "train", image_size=IMAGE_SIZE, batch_size=BATCH_SIZE)
+    evalloader = load_data(dataset_name, "eval", image_size=IMAGE_SIZE, batch_size=BATCH_SIZE)
     print(f"Train batches: {len(trainloader)}, Eval batches: {len(evalloader)}")
-    if MAX_BATCHES:
-        print(f"Limited to {MAX_BATCHES} batches per epoch")
 
-    model = Net()
-    model.to(device)
-    print(f"\nStarting training for {EPOCHS} epochs...")
+    model = Net().to(device)
+    print(f"\nStarting training for {EPOCHS} epochs on {device}...")
     for epoch in range(1, EPOCHS + 1):
-        # Train for 1 epoch
         print(f"\n[Epoch {epoch}/{EPOCHS}] Training...")
         train_loss = train_fn(
             model, trainloader, epochs=1, lr=LEARNING_RATE, device=device
         )
         print(f"  Train loss: {train_loss:.4f}")
 
-        # Evaluate after each epoch
         print(f"[Epoch {epoch}/{EPOCHS}] Evaluating...")
-        eval_loss, auroc, f1, sensitivity, specificity, precision = test_fn(
-            model, evalloader, device
-        )
+        eval_loss, tp, tn, fp, fn, probs, labels = test_fn(model, evalloader, device)
+        auroc = roc_auc_score(labels, probs)
+        cm_metrics = compute_metrics_from_confusion_matrix(tp, tn, fp, fn)
         print(f"  Eval loss: {eval_loss:.4f}")
         print(f"  AUROC: {auroc:.4f}")
-        print(f"  F1: {f1:.4f}")
-        print(f"  Sensitivity (Recall): {sensitivity:.4f}")
-        print(f"  Specificity: {specificity:.4f}")
-        print(f"  Precision: {precision:.4f}")
+        print(
+            f"  Sensitivity: {cm_metrics['sensitivity']:.4f} | "
+            f"Specificity: {cm_metrics['specificity']:.4f} | "
+            f"Precision: {cm_metrics['precision']:.4f} | "
+            f"F1: {cm_metrics['f1']:.4f}"
+        )
 
-    # Save model
     model_path = f"hospital_{HOSPITAL}_model.pt"
     torch.save(model.state_dict(), model_path)
     print(f"\nTraining complete! Model saved to {model_path}")
