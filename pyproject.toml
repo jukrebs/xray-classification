@@ -19,6 +19,7 @@ dependencies = [
     "torch",
     "torchvision",
     "datasets",
+    "transformers",
     "scipy",
     "scikit-learn",
     "wandb",
