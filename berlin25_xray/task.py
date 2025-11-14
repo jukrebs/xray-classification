@@ -180,7 +180,7 @@ def collate_preprocessed(batch):
     return result
 
 
-def _suggest_num_workers():
+def _suggest_num_workers(dataset_size: int, batch_size: int) -> int:
     """Pick a DataLoader worker count that scales on both laptops and servers."""
 
     try:
@@ -188,9 +188,24 @@ def _suggest_num_workers():
         cpu_count = len(affinity)
     except AttributeError:
         cpu_count = os.cpu_count() or 1
+
     if cpu_count <= 2:
-        return 0  # small environments prefer main-thread loading
-    return min(8, max(2, cpu_count // 2))
+        base = 0
+    else:
+        base = min(8, max(2, cpu_count // 2))
+
+    # HuggingFace Arrow is already memory-mapped; extra workers yield little benefit
+    # for very large batches but can stall ROCm start-up. Fall back to single-threaded
+    # loading in that scenario to avoid multi-minute warmups.
+    if batch_size >= 512 and IS_ROCM:
+        return 0
+
+    # Tiny epoch (few batches) or very large batches benefit less from many workers.
+    total_batches = max(1, dataset_size // max(1, batch_size))
+    if total_batches <= 64 or batch_size >= 512:
+        base = min(base, 2)
+
+    return base
 
 
 def _supports_channels_last(device: torch.device) -> bool:
@@ -341,7 +356,7 @@ def load_data(
         data = hospital_datasets[cache_key]
         num_examples = len(data)
         shuffle = split_name == "train"  # shuffle only for training splits
-        num_workers = _suggest_num_workers()
+        num_workers = _suggest_num_workers(num_examples, batch_size)
         pin_memory = torch.cuda.is_available() and not IS_ROCM
         loader_kwargs = dict(
             dataset=data,
@@ -353,7 +368,7 @@ def load_data(
         )
         if loader_kwargs["num_workers"] > 0:
             loader_kwargs["persistent_workers"] = True
-            prefetch_factor = max(2, min(8, max(1, batch_size // 32)))
+            prefetch_factor = max(2, min(4, max(1, batch_size // 256)))
             loader_kwargs["prefetch_factor"] = prefetch_factor
             try:
                 loader_kwargs["multiprocessing_context"] = mp.get_context("spawn")
