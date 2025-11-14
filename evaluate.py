@@ -9,7 +9,7 @@ import torch
 import wandb
 from sklearn.metrics import roc_auc_score
 
-from berlin25_xray.task import Net, load_data, test
+from berlin25_xray.cold_start_hackathon.task import Net, load_data, test
 
 # Suppress W&B directory warning
 os.environ["WANDB_DIR"] = os.path.expanduser("~/.cache/wandb")
@@ -22,7 +22,7 @@ DATASET_DIR = os.environ["DATASET_DIR"]
 
 def evaluate_split(model, dataset_name, split_name, device):
     """Evaluate on any dataset split."""
-    loader = load_data(dataset_name, split_name, image_size=224, batch_size=32)
+    loader = load_data(dataset_name, split_name, image_size=128, batch_size=32)
     _, _, _, _, _, probs, labels = test(model, loader, device)
     return roc_auc_score(labels, probs), len(loader.dataset)
 

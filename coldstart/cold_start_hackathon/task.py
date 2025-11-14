@@ -1,70 +1,37 @@
 import os
-import functools
 
 import numpy as np
 import torch
 import torch.nn as nn
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
+from torchvision import models
 from tqdm import tqdm
-from transformers import AutoImageProcessor, AutoModel
 
 hospital_datasets = {}  # Cache loaded hospital datasets
 
-DEFAULT_MODEL_NAME = os.environ.get("CXFORMER_MODEL_NAME", "m42-health/CXformer-base")
-FREEZE_ENCODER = os.environ.get("CXFORMER_FREEZE_ENCODER", "1").lower() not in {"0", "false", "no"}
-CLASSIFIER_DIM = int(os.environ.get("CXFORMER_CLASSIFIER_DIM", "512"))
-CLASSIFIER_DROPOUT = float(os.environ.get("CXFORMER_CLASSIFIER_DROPOUT", "0.2"))
-
-
-@functools.lru_cache(maxsize=1)
-def get_image_processor():
-    """Load and cache the CXformer image processor once per process."""
-    return AutoImageProcessor.from_pretrained(DEFAULT_MODEL_NAME, trust_remote_code=True)
-
-
-def _tensor_to_rgb_np(tensor: torch.Tensor) -> np.ndarray:
-    """Convert a tensor in CHW or HW format to float32 RGB numpy array."""
-    array = tensor.detach().cpu().numpy()
-    if array.ndim == 3:
-        array = np.moveaxis(array, 0, -1)
-    elif array.ndim == 2:
-        array = array[..., None]
-    if array.shape[-1] == 1:
-        array = np.repeat(array, 3, axis=-1)
-    return array.astype(np.float32, copy=False)
-
-
-def prepare_model_inputs(batch_x: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """Convert grayscale tensors to CXformer pixel values."""
-    processor = get_image_processor()
-    images = [_tensor_to_rgb_np(img) for img in batch_x]
-    processed = processor(images=images, return_tensors="pt")
-    return processed["pixel_values"].to(device)
-
 
 class Net(nn.Module):
-    """CXformer encoder plus a lightweight binary classification head."""
+    """Starting point: ResNet18-based model for binary chest X-ray classification."""
 
     def __init__(self):
-        super().__init__()
-        self.encoder = AutoModel.from_pretrained(DEFAULT_MODEL_NAME, trust_remote_code=True)
-        hidden_size = self.encoder.config.hidden_size
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, CLASSIFIER_DIM),
-            nn.GELU(),
-            nn.Dropout(CLASSIFIER_DROPOUT),
-            nn.Linear(CLASSIFIER_DIM, 1),
+        super(Net, self).__init__()
+        self.model = models.resnet18(weights=None)
+        # Adapt to grayscale input
+        self.model.conv1 = nn.Conv2d(
+            in_channels=1,
+            out_channels=64,
+            kernel_size=7,
+            stride=2,
+            padding=3,
+            bias=False,
         )
-        if FREEZE_ENCODER:
-            for param in self.encoder.parameters():
-                param.requires_grad = False
+        # Binary classification head (single logit)
+        in_features = self.model.fc.in_features
+        self.model.fc = nn.Linear(in_features, 1)
 
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        outputs = self.encoder(pixel_values=pixel_values)
-        cls_token = outputs.last_hidden_state[:, 0]
-        return self.classifier(cls_token)
+    def forward(self, x):
+        return self.model(x)  # No sigmoid, using BCEWithLogitsLoss
 
 
 def collate_preprocessed(batch):
@@ -73,7 +40,7 @@ def collate_preprocessed(batch):
     for key in batch[0].keys():
         if key in ["x", "y"]:
             # Convert lists to tensors and stack
-            result[key] = torch.stack([torch.as_tensor(item[key], dtype=torch.float32) for item in batch])
+            result[key] = torch.stack([torch.tensor(item[key]) for item in batch])
         else:
             # Keep other fields as lists
             result[key] = [item[key] for item in batch]
@@ -84,7 +51,7 @@ def load_data(
     dataset_name: str,
     split_name: str,
     image_size: int = 128,
-    batch_size: int = 1024,
+    batch_size: int = 16,
 ):
     """Load hospital X-ray data.
 
@@ -116,15 +83,15 @@ def load_data(
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=1e-2)
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
         for batch in tqdm(trainloader):
-            pixel_values = prepare_model_inputs(batch["x"], device)
-            y = batch["y"].float().to(device)
+            x = batch["x"].to(device)
+            y = batch["y"].to(device)
             optimizer.zero_grad()
-            outputs = net(pixel_values)
+            outputs = net(x)
             loss = criterion(outputs, y)
             loss.backward()
             optimizer.step()
@@ -155,9 +122,9 @@ def test(net, testloader, device):
     all_labels = []
     with torch.no_grad():
         for batch in testloader:
-            pixel_values = prepare_model_inputs(batch["x"], device)
-            y = batch["y"].float().to(device)
-            outputs = net(pixel_values)
+            x = batch["x"].to(device)
+            y = batch["y"].to(device)
+            outputs = net(x)
             loss = criterion(outputs, y)
             total_loss += loss.item()
 

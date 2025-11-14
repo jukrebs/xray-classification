@@ -2,10 +2,10 @@ import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
-from berlin25_xray.task import Net, load_data
-from berlin25_xray.util import PARTITION_HOSPITAL_MAP
-from berlin25_xray.task import test as test_fn
-from berlin25_xray.task import train as train_fn
+from cold_start_hackathon.task import Net, load_data
+from cold_start_hackathon.util import PARTITION_HOSPITAL_MAP
+from cold_start_hackathon.task import test as test_fn
+from cold_start_hackathon.task import train as train_fn
 
 app = ClientApp()
 

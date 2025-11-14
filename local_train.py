@@ -1,17 +1,21 @@
-"""Local training script to sanity-check the ViT-B/16 baseline."""
+"""Local training script to sanity-check the CXformer baseline."""
 
 import torch
 from sklearn.metrics import roc_auc_score
 
-from berlin25_xray.task import Net, compute_metrics_from_confusion_matrix, load_data
-from berlin25_xray.task import test as test_fn
-from berlin25_xray.task import train as train_fn
+from berlin25_xray.cold_start_hackathon.task import (
+    Net,
+    compute_metrics_from_confusion_matrix,
+    load_data,
+)
+from berlin25_xray.cold_start_hackathon.task import test as test_fn
+from berlin25_xray.cold_start_hackathon.task import train as train_fn
 
 HOSPITAL = "A"  # A, B, or C
 EPOCHS = 3
 LEARNING_RATE = 1e-4
 BATCH_SIZE = 16
-IMAGE_SIZE = 224
+IMAGE_SIZE = 128
 
 
 def main():
