@@ -45,7 +45,7 @@ clientapp = "berlin25_xray.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-image-size = 128        # Image size (128 or 224)
+image-size = 224        # Image size (128 or 224)
 num-server-rounds = 100 # Slurm processes are capped to 15min
 local-epochs = 1
 lr = 0.01
@@ -63,6 +63,6 @@ address = "supergrid.flower.ai"
 enable-account-auth = true
 
 [tool.flwr.federations.cluster]
-options.num-supernodes = 3
+options.num-supernodes = 1
 options.backend.client-resources.num-cpus = 4
 options.backend.client-resources.num-gpus = 0.33
