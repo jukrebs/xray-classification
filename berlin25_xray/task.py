@@ -1,6 +1,8 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
+import logging
 import os
+import time
 
 import numpy as np
 import torch
@@ -15,6 +17,12 @@ from torchvision.models import ViT_B_16_Weights, vit_b_16
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
 
+from berlin25_xray.logging_utils import (
+    configure_logging,
+    log_gpu_utilization,
+    log_timing,
+)
+
 PARTITION_HOSPITAL_MAP = {
     0: "A",
     1: "B",
@@ -22,6 +30,9 @@ PARTITION_HOSPITAL_MAP = {
 }
 
 hospital_datasets = {}  # Cache loaded hospital datasets
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 
 class Net(nn.Module):
@@ -97,6 +108,13 @@ def load_data(
         image_size: Image size (128 or 224)
         batch_size: Number of samples per batch
     """
+    logger.info(
+        "Preparing dataloader | dataset=%s | split=%s | image_size=%d | batch_size=%d",
+        dataset_name,
+        split_name,
+        image_size,
+        batch_size,
+    )
     dataset_dir = os.environ["DATASET_DIR"]
 
     # Use preprocessed dataset based on image_size
@@ -105,27 +123,49 @@ def load_data(
         f"{dataset_dir}/xray_fl_datasets_preprocessed_{image_size}/{dataset_name}"
     )
 
-    # Load and cache dataset
-    global hospital_datasets
-    if cache_key not in hospital_datasets:
-        full_dataset = load_from_disk(dataset_path)
-        hospital_datasets[cache_key] = full_dataset[split_name]
-        print(f"Loaded {dataset_path}/{split_name}")
+    with log_timing(
+        logger, f"Dataloader preparation for {dataset_name}/{split_name}"
+    ):
+        # Load and cache dataset
+        global hospital_datasets
+        cache_hit = cache_key in hospital_datasets
+        if not cache_hit:
+            logger.info(
+                "Cache miss for %s/%s. Loading dataset from %s",
+                dataset_name,
+                split_name,
+                dataset_path,
+            )
+            full_dataset = load_from_disk(dataset_path)
+            hospital_datasets[cache_key] = full_dataset[split_name]
+        else:
+            logger.info("Cache hit for %s/%s", dataset_name, split_name)
 
-    data = hospital_datasets[cache_key]
-    shuffle = split_name == "train"  # shuffle only for training splits
-    loader_kwargs = dict(
-        dataset=data,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=4,
-        pin_memory=torch.cuda.is_available(),
-        collate_fn=collate_preprocessed,
-    )
-    if loader_kwargs["num_workers"] > 0:
-        loader_kwargs["persistent_workers"] = True
-        loader_kwargs["prefetch_factor"] = 4
-    dataloader = DataLoader(**loader_kwargs)
+        data = hospital_datasets[cache_key]
+        num_examples = len(data)
+        shuffle = split_name == "train"  # shuffle only for training splits
+        loader_kwargs = dict(
+            dataset=data,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=4,
+            pin_memory=torch.cuda.is_available(),
+            collate_fn=collate_preprocessed,
+        )
+        if loader_kwargs["num_workers"] > 0:
+            loader_kwargs["persistent_workers"] = True
+            loader_kwargs["prefetch_factor"] = 4
+        dataloader = DataLoader(**loader_kwargs)
+        num_batches = len(dataloader)
+        logger.info(
+            "Dataloader ready | dataset=%s/%s | samples=%d | batches=%d | workers=%d | shuffle=%s",
+            dataset_name,
+            split_name,
+            num_examples,
+            num_batches,
+            loader_kwargs["num_workers"],
+            shuffle,
+        )
     return dataloader
 
 
@@ -145,9 +185,25 @@ def train(net, trainloader, epochs, lr, device):
             scaler = amp.GradScaler(enabled=use_amp)
     net.train()
     running_loss = 0.0
-    total_steps = len(trainloader) * max(epochs, 1)
-    for _ in range(epochs):
-        for batch in tqdm(trainloader):
+    num_batches = len(trainloader)
+    num_examples = len(trainloader.dataset)
+    total_steps = num_batches * max(epochs, 1)
+    logger.info(
+        "Starting training | device=%s | epochs=%d | batches=%d | samples=%d | lr=%s | amp=%s",
+        device,
+        epochs,
+        num_batches,
+        num_examples,
+        lr,
+        use_amp,
+    )
+    log_gpu_utilization(logger, device, prefix="Train/start")
+    train_start = time.perf_counter()
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        epoch_start = time.perf_counter()
+        progress = tqdm(trainloader, desc=f"Epoch {epoch + 1}/{epochs}")
+        for batch in progress:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
             optimizer.zero_grad(set_to_none=True)
@@ -165,7 +221,25 @@ def train(net, trainloader, epochs, lr, device):
             scaler.step(optimizer)
             scaler.update()
             running_loss += loss.item()
+            epoch_loss += loss.item()
+        epoch_duration = time.perf_counter() - epoch_start
+        avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
+        logger.info(
+            "Epoch %d/%d finished in %.2fs | avg loss %.4f",
+            epoch + 1,
+            epochs,
+            epoch_duration,
+            avg_epoch_loss,
+        )
+        log_gpu_utilization(logger, device, prefix=f"Train/epoch{epoch + 1}")
+    total_duration = time.perf_counter() - train_start
     avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
+    logger.info(
+        "Training complete in %.2fs | avg loss %.4f",
+        total_duration,
+        avg_loss,
+    )
+    log_gpu_utilization(logger, device, prefix="Train/end")
     return avg_loss
 
 
@@ -185,10 +259,20 @@ def test(net, testloader, device):
     criterion = torch.nn.BCEWithLogitsLoss()
     net.eval()
     total_loss = 0.0
+    num_batches = len(testloader)
+    num_examples = len(testloader.dataset)
+    logger.info(
+        "Starting evaluation | device=%s | batches=%d | samples=%d",
+        device,
+        num_batches,
+        num_examples,
+    )
+    log_gpu_utilization(logger, device, prefix="Eval/start")
 
     all_probs = []
     all_predictions = []
     all_labels = []
+    eval_start = time.perf_counter()
     with torch.no_grad():
         for batch in testloader:
             x = batch["x"].to(device)
@@ -206,7 +290,14 @@ def test(net, testloader, device):
             all_predictions.append(predictions.cpu().numpy())
             all_labels.append(y.cpu().numpy())
 
+    elapsed = time.perf_counter() - eval_start
     avg_loss = total_loss / len(testloader)
+    logger.info(
+        "Evaluation complete in %.2fs | avg loss %.4f",
+        elapsed,
+        avg_loss,
+    )
+    log_gpu_utilization(logger, device, prefix="Eval/end")
 
     # Flatten arrays
     all_probs = np.concatenate(all_probs).flatten()
