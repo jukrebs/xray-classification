@@ -1,6 +1,7 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ try:
     from torch import amp  # PyTorch >= 2.0 preferred API
 except ImportError:  # pragma: no cover - fallback for older runtimes
     from torch.cuda import amp  # type: ignore
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 import torchvision.transforms.functional as TF
 from torchvision.transforms import (
     Compose,
@@ -124,10 +125,22 @@ class Net(nn.Module):
         x = (x - self.cx_mean) / self.cx_std
 
         # Forward through backbone (DINOv2-style, uses 'pixel_values' as input key).
-        outputs = self.backbone(pixel_values=x)
+        outputs = self.backbone(
+            pixel_values=x,
+            output_hidden_states=False,
+            return_dict=True,
+        )
 
-        # Use the model's pooled representation (handles registers/cls internally).
-        pooled = outputs.pooler_output  # [B, hidden_dim]
+        # Robust pooling: prefer patch-token mean, ignoring cls/register tokens.
+        pooled = getattr(outputs, "pooler_output", None)
+        if pooled is None:
+            last = getattr(outputs, "last_hidden_state", None)
+            if last is None:
+                raise RuntimeError("CXformer outputs must provide 'pooler_output' or 'last_hidden_state'")
+            num_reg = getattr(self.backbone.config, "num_register_tokens", 0)
+            # tokens: [CLS] [REG...REG] [PATCH...PATCH]
+            patch_tokens = last[:, 1 + num_reg :, :]
+            pooled = patch_tokens.mean(dim=1)
 
         # Forward through all heads and average logits: [B, 1, num_heads] -> [B, 1]
         head_logits = [head(pooled) for head in self.heads]  # list of [B, 1]
@@ -159,6 +172,21 @@ def _build_optimizer(model: nn.Module, lr: float):
     # Fallback: single parameter group for any other model.
     params = (p for p in model.parameters() if p.requires_grad)
     return torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
+
+
+def _make_warmup_cosine(optimizer, warmup_steps: int, total_steps: int):
+    """Create a lightweight warmup+cosine LR scheduler."""
+
+    def lr_lambda(step: int) -> float:
+        if total_steps <= 0:
+            return 1.0
+        if step < warmup_steps:
+            return float(step + 1) / max(1, warmup_steps)
+        progress = float(step - warmup_steps) / max(1, total_steps - warmup_steps)
+        progress = min(max(progress, 0.0), 1.0)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 def _compute_pos_weight(trainloader, device):
@@ -273,6 +301,7 @@ def load_data(
     split_name: str,
     image_size: int = DEFAULT_IMAGE_SIZE,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    balance: bool = False,
 ):
     """Load hospital X-ray data.
 
@@ -328,10 +357,32 @@ def load_data(
         data = hospital_datasets[cache_key]
         num_examples = len(data)
         shuffle = split_name == "train"  # shuffle only for training splits
+        sampler = None
+        if split_name == "train" and balance:
+            ys = np.asarray(data["y"], dtype=np.float32).reshape(-1)
+            num_pos = float((ys >= 0.5).sum())
+            num_neg = float((ys < 0.5).sum())
+            if num_pos == 0 or num_neg == 0:
+                logger.warning(
+                    "Skipping balanced sampler due to degenerate class distribution (pos=%s, neg=%s)",
+                    num_pos,
+                    num_neg,
+                )
+            else:
+                w_pos = 1.0 / num_pos
+                w_neg = 1.0 / num_neg
+                weights = np.where(ys >= 0.5, w_pos, w_neg)
+                sampler = WeightedRandomSampler(
+                    torch.as_tensor(weights, dtype=torch.double),
+                    num_samples=len(weights),
+                    replacement=True,
+                )
+                shuffle = False  # sampler and shuffle cannot be used together
         loader_kwargs = dict(
             dataset=data,
             batch_size=batch_size,
             shuffle=shuffle,
+            sampler=sampler,
             num_workers=4,
             pin_memory=torch.cuda.is_available(),
             collate_fn=collate_preprocessed,
@@ -365,7 +416,12 @@ def dataset_name_from_partition(partition_id: int) -> str:
 
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    pos_weight = _compute_pos_weight(trainloader, device)
+    use_balanced_sampler = isinstance(getattr(trainloader, "sampler", None), WeightedRandomSampler)
+    if use_balanced_sampler:
+        pos_weight = torch.tensor([1.0], device=device)
+        logger.info("Using balanced sampler; setting pos_weight to 1.0")
+    else:
+        pos_weight = _compute_pos_weight(trainloader, device)
     criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(device)
     optimizer = _build_optimizer(net, lr)
     device_type = device.type
@@ -382,6 +438,8 @@ def train(net, trainloader, epochs, lr, device):
     num_batches = len(trainloader)
     num_examples = len(trainloader.dataset)
     total_steps = num_batches * max(epochs, 1)
+    warmup_steps = max(10, int(0.1 * total_steps)) if total_steps > 0 else 0
+    scheduler = _make_warmup_cosine(optimizer, warmup_steps, total_steps)
     logger.info(
         "Starting training | device=%s | epochs=%d | batches=%d | samples=%d | lr=%s | amp=%s",
         device,
@@ -415,6 +473,7 @@ def train(net, trainloader, epochs, lr, device):
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step()
             running_loss += loss.item()
             epoch_loss += loss.item()
         epoch_duration = time.perf_counter() - epoch_start

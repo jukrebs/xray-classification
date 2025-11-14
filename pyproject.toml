@@ -48,8 +48,8 @@ clientapp = "berlin25_xray.client_app:app"
 image-size = 128        # Smaller resolution cuts ViT token count for faster epochs
 batch-size = 1024       # Larger batches reduce optimizer steps without extra memory cost
 num-server-rounds = 3   # More rounds for CXformer finetuning
-local-epochs = 6        # 3 x 6 = 18 effective local epochs (still <20min on MI300X)
-lr = 0.0008             # Higher LR for CXformer head; backbone scaled by CXFORMER_BACKBONE_LR_SCALE
+local-epochs = 5        # 3 x 5 = 15 effective local epochs (~16-17min, safe with new extras)
+lr = 0.001              # Head LR; backbone scaled by CXFORMER_BACKBONE_LR_SCALE
 compile-model = false   # Disable torch.compile to save time on MI300X
 
 # Default federation to use when running the app
