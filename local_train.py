@@ -73,6 +73,7 @@ def main():
         "train",
         image_size=TRAINING_CONFIG.image_size,
         batch_size=TRAINING_CONFIG.batch_size,
+        balance=True,
     )
     evalloader = load_data(
         dataset_name,
