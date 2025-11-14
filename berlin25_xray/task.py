@@ -40,8 +40,12 @@ class Net(nn.Module):
             param.requires_grad = True
 
         # Store ImageNet normalization stats so inputs match the pretrained backbone
-        mean = torch.tensor(weights.meta["mean"]).view(1, 3, 1, 1)
-        std = torch.tensor(weights.meta["std"]).view(1, 3, 1, 1)
+        # Fallback to standard ImageNet stats if torchvision doesn't expose them via weights.meta
+        meta = getattr(weights, "meta", {}) or {}
+        mean_vals = meta.get("mean", (0.485, 0.456, 0.406))
+        std_vals = meta.get("std", (0.229, 0.224, 0.225))
+        mean = torch.tensor(mean_vals).view(1, 3, 1, 1)
+        std = torch.tensor(std_vals).view(1, 3, 1, 1)
         self.register_buffer("imagenet_mean", mean, persistent=False)
         self.register_buffer("imagenet_std", std, persistent=False)
 
