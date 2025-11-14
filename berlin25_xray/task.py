@@ -41,6 +41,27 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
+def _configure_torch_backends():
+    """Enable backend knobs that speed up conv-heavy models without hurting accuracy."""
+
+    try:
+        torch.set_float32_matmul_precision("medium")
+    except Exception:  # pragma: no cover - torch version dependent
+        pass
+    try:
+        torch.backends.cudnn.benchmark = True
+    except Exception:  # pragma: no cover - backend might be missing
+        pass
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception:  # pragma: no cover - CPU only or old torch
+        pass
+
+
+_configure_torch_backends()
+
+
 class Net(nn.Module):
     """DenseNet121 backbone with a lightweight X-ray specific classification head."""
 
@@ -152,6 +173,37 @@ def collate_preprocessed(batch):
             # Keep other fields as lists
             result[key] = [item[key] for item in batch]
     return result
+
+
+def _suggest_num_workers():
+    """Pick a DataLoader worker count that scales on both laptops and servers."""
+
+    try:
+        affinity = os.sched_getaffinity(0)
+        cpu_count = len(affinity)
+    except AttributeError:
+        cpu_count = os.cpu_count() or 1
+    if cpu_count <= 2:
+        return 0  # small environments prefer main-thread loading
+    return min(8, max(2, cpu_count // 2))
+
+
+def prepare_model_for_device(model: nn.Module, device: torch.device) -> nn.Module:
+    """Move a model to the target device using channel-last layout when beneficial."""
+
+    memory_format = torch.channels_last if device.type == "cuda" else torch.preserve_format
+    return model.to(device=device, memory_format=memory_format)
+
+
+def _move_batch_to_device(batch, device: torch.device):
+    """Copy batch tensors to device asynchronously and keep channel-last layout on CUDA."""
+
+    non_blocking = device.type == "cuda"
+    x = batch["x"].to(device=device, non_blocking=non_blocking)
+    y = batch["y"].to(device=device, non_blocking=non_blocking)
+    if device.type == "cuda":
+        x = x.to(memory_format=torch.channels_last)
+    return x, y
 
 
 def _compute_class_statistics(dataset):
@@ -279,17 +331,20 @@ def load_data(
         data = hospital_datasets[cache_key]
         num_examples = len(data)
         shuffle = split_name == "train"  # shuffle only for training splits
+        num_workers = _suggest_num_workers()
+        pin_memory = torch.cuda.is_available()
         loader_kwargs = dict(
             dataset=data,
             batch_size=batch_size,
             shuffle=shuffle,
-            num_workers=4,
-            pin_memory=torch.cuda.is_available(),
+            num_workers=num_workers,
+            pin_memory=pin_memory,
             collate_fn=collate_preprocessed,
         )
         if loader_kwargs["num_workers"] > 0:
             loader_kwargs["persistent_workers"] = True
-            loader_kwargs["prefetch_factor"] = 4
+            prefetch_factor = max(2, min(8, max(1, batch_size // 32)))
+            loader_kwargs["prefetch_factor"] = prefetch_factor
         dataloader = DataLoader(**loader_kwargs)
         class_stats = _compute_class_statistics(data)
         if class_stats:
@@ -327,7 +382,7 @@ def dataset_name_from_partition(partition_id: int) -> str:
 
 
 def train(net, trainloader, epochs, lr, device):
-    net.to(device)
+    net = prepare_model_for_device(net, device)
     class_stats = getattr(trainloader, "class_stats", None)
     pos_weight_value = None
     if isinstance(class_stats, dict):
@@ -375,8 +430,7 @@ def train(net, trainloader, epochs, lr, device):
         epoch_start = time.perf_counter()
         progress = tqdm(trainloader, desc=f"Epoch {epoch + 1}/{epochs}")
         for batch in progress:
-            x = batch["x"].to(device)
-            y = batch["y"].to(device)
+            x, y = _move_batch_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
             try:
                 autocast_ctx = amp.autocast(device_type=device_type, enabled=use_amp)
@@ -426,7 +480,7 @@ def test(net, testloader, device):
         all_probs: Array of prediction probabilities (for ROC-AUC)
         all_labels: Array of true labels (for ROC-AUC)
     """
-    net.to(device)
+    net = prepare_model_for_device(net, device)
     criterion = torch.nn.BCEWithLogitsLoss()
     net.eval()
     total_loss = 0.0
@@ -446,8 +500,7 @@ def test(net, testloader, device):
     eval_start = time.perf_counter()
     with torch.no_grad():
         for batch in testloader:
-            x = batch["x"].to(device)
-            y = batch["y"].to(device)
+            x, y = _move_batch_to_device(batch, device)
             outputs = net(x)
             loss = criterion(outputs, y)
             total_loss += loss.item()

@@ -13,6 +13,7 @@ from berlin25_xray.task import (
     dataset_name_from_partition,
     load_data,
     maybe_compile_model,
+    prepare_model_for_device,
 )
 from berlin25_xray.task import test as test_fn
 from berlin25_xray.task import train as train_fn
@@ -87,7 +88,7 @@ def train(msg: Message, context: Context):
     model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     logger.info("Starting client training on %s", device)
-    model.to(device)
+    model = prepare_model_for_device(model, device)
     model = maybe_compile_model(
         model,
         mode="client-train",
@@ -139,7 +140,7 @@ def evaluate(msg: Message, context: Context):
     model = Net(image_size=settings.image_size)
     model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    model = prepare_model_for_device(model, device)
     model = maybe_compile_model(
         model,
         mode="client-eval",
