@@ -31,7 +31,7 @@ DEFAULT_BATCH_SIZE = 16
 DEFAULT_EVAL_BATCH_SIZE = 32
 
 # CXformer tuning hyperparameters
-CXFORMER_TUNE_LAST_N_LAYERS = 2
+CXFORMER_TUNE_LAST_N_LAYERS = 4
 CXFORMER_BACKBONE_LR_SCALE = 0.1  # backbone LR = head LR * scale
 
 PARTITION_HOSPITAL_MAP = {
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 class Net(nn.Module):
     """CXformer-base backbone (X-ray pretrained) + small head ensemble."""
 
-    def __init__(self, image_size: int = DEFAULT_IMAGE_SIZE, num_heads: int = 4):
+    def __init__(self, image_size: int = DEFAULT_IMAGE_SIZE, num_heads: int = 8):
         super(Net, self).__init__()
 
         self.model_name = "m42-health/CXformer-base"
@@ -76,9 +76,17 @@ class Net(nn.Module):
         # Hidden size comes from the config (typically 768).
         hidden_dim = self.backbone.config.hidden_size
 
-        # Small ensemble of binary heads: any finding vs no finding.
+        # Small ensemble of binary MLP heads: any finding vs no finding.
         self.heads = nn.ModuleList(
-            [nn.Linear(hidden_dim, 1) for _ in range(self.num_heads)]
+            [
+                nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim // 2),
+                    nn.GELU(),
+                    nn.Dropout(p=0.1),
+                    nn.Linear(hidden_dim // 2, 1),
+                )
+                for _ in range(self.num_heads)
+            ]
         )
 
         # CXformer uses ImageNet-style normalization.
