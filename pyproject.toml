@@ -44,12 +44,12 @@ clientapp = "berlin25_xray.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-image-size = 128        # Image size (128 or 224)
+image-size = 224        # Use high-res 224px preprocessing for DenseNet
 batch-size = 1024       # Larger batches reduce optimizer steps without extra memory cost
 num-server-rounds = 5
 local-epochs = 2
-lr = 0.0001             # Head-only finetuning LR
-compile-model = true    # Enable torch.compile for fused ViT execution
+lr = 0.0001             # Works well for full DenseNet fine-tuning
+compile-model = true    # torch.compile still helps squeeze extra GPU throughput
 
 # Default federation to use when running the app
 [tool.flwr.federations]
