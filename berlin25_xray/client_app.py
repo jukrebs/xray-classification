@@ -2,7 +2,8 @@ import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
-from berlin25_xray.task import PARTITION_HOSPITAL_MAP, Net, load_data
+from berlin25_xray.task import Net, load_data
+from berlin25_xray.util import PARTITION_HOSPITAL_MAP
 from berlin25_xray.task import test as test_fn
 from berlin25_xray.task import train as train_fn
 
@@ -62,18 +63,16 @@ def evaluate(msg: Message, context: Context):
 
     eval_loss, tp, tn, fp, fn, probs, labels = test_fn(model, valloader, device)
 
-    metric_record = MetricRecord(
-        {
-            "partition-id": context.node_config["partition-id"],
-            "eval_loss": eval_loss,
-            "tp": tp,
-            "tn": tn,
-            "fp": fp,
-            "fn": fn,
-            "num-examples": len(valloader.dataset),
-            "probs": probs.tolist(),  # Convert numpy array to list for MetricRecord
-            "labels": labels.tolist(),  # Convert numpy array to list for MetricRecord
-        }
-    )
+    metric_record = MetricRecord({
+        "partition-id": context.node_config["partition-id"],
+        "eval_loss": eval_loss,
+        "tp": tp,
+        "tn": tn,
+        "fp": fp,
+        "fn": fn,
+        "num-examples": len(valloader.dataset),
+        "probs": probs.tolist(),  # Convert numpy array to list for MetricRecord
+        "labels": labels.tolist(),  # Convert numpy array to list for MetricRecord
+    })
     content = RecordDict({"metrics": metric_record})
     return Message(content=content, reply_to=msg)

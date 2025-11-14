@@ -56,7 +56,7 @@ We now fine-tune the [m42-health/CXformer-base](https://huggingface.co/m42-healt
 
 ### Start With Hospital A Only
 
-Local simulations are configured to spin up **one** supernode by default, which corresponds to Hospital A. This keeps experimentation fast and lets you de-risk the CXformer integration before federating with B and C. When you are ready, set `options.num-supernodes = 3` inside `[tool.flwr.federations.local-simulation]` (or pass `--num-supernodes 3` on the CLI) to bring every hospital back into the loop.
+Local simulations now launch all three hospitals by default, mirroring the cluster deployments. If you want to iterate quickly on Hospital A only, supply `--num-supernodes 1` (or edit the config temporarily) when running Flower locally.
 
 Example commands:
 
@@ -66,12 +66,12 @@ pip install -e .
 
 # Launch a single-hospital Flower round locally (Hospital A)
 DATASET_DIR=/shared/hackathon/datasets \
-flwr run coldstart local-simulation
+flwr run coldstart_real local-simulation --num-supernodes 1
 
 # Unfreeze CXformer and try a longer run once things look good
 CXFORMER_FREEZE_ENCODER=0 \
 DATASET_DIR=/shared/hackathon/datasets \
-flwr run coldstart local-simulation
+flwr run coldstart_real local-simulation --num-supernodes 1
 ```
 
 ## 🚀 Quick Start
@@ -118,13 +118,13 @@ Note: Full datasets are only available on the cluster.
 # From the repository root
 
 # Submit training job (defaults: 4 CPUs, 32GB RAM, 20min wall time, no GPU)
-./submit-job.sh "flwr run coldstart cluster --stream"
+./submit-job.sh "flwr run coldstart_real cluster-gpu --stream"
 
 # Request a GPU and custom run name (shows up as JOB_NAME inside Flower/W&B)
-./submit-job.sh "flwr run coldstart cluster --stream" --gpu --name exp_lr001
+./submit-job.sh "flwr run coldstart_real cluster-gpu --stream" --gpu --name exp_lr001
 
 # Launch the evaluation script with the same infrastructure
-./submit-job.sh "python coldstart/evaluate.py" --gpu --name eval_v5
+./submit-job.sh "python coldstart_real/evaluate.py" --gpu --name eval_v5
 ```
 
 If `sbatch` is available, the helper submits to SLURM and streams logs to `~/logs/<job>_<jobid>.out`. Without SLURM (e.g., local dev), it simply runs the command inline.
