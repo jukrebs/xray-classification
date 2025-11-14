@@ -14,8 +14,8 @@ from tqdm import tqdm
 from transformers import AutoImageProcessor, AutoModel
 
 PARTITION_HOSPITAL_MAP = {
-    0: "B",
-    1: "A",
+    0: "A",
+    1: "B",
     2: "C",
 }
 
