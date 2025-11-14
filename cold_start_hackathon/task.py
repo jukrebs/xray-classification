@@ -12,26 +12,51 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 
 class Net(nn.Module):
-    """Starting point: ResNet18-based model for binary chest X-ray classification."""
+    """DenseNet121 backbone initialized with ImageNet weights for fine-tuning."""
 
-    def __init__(self):
+    def __init__(self, dropout: float = 0.2):
         super(Net, self).__init__()
-        self.model = models.resnet18(weights=None)
-        # Adapt to grayscale input
-        self.model.conv1 = nn.Conv2d(
-            in_channels=1,
-            out_channels=64,
-            kernel_size=7,
-            stride=2,
-            padding=3,
-            bias=False,
+
+        # Load ImageNet-pretrained DenseNet121 and adapt for grayscale inputs
+        weights = models.DenseNet121_Weights.DEFAULT
+        model = models.densenet121(weights=weights)
+        model.features.conv0 = convert_first_conv_to_grayscale(model.features.conv0)
+
+        # Replace the classifier with a binary head better suited for medical imagery
+        in_features = model.classifier.in_features
+        model.classifier = nn.Sequential(
+            nn.Linear(in_features, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(512, 1),
         )
-        # Binary classification head (single logit)
-        in_features = self.model.fc.in_features
-        self.model.fc = nn.Linear(in_features, 1)
+
+        self.model = model
 
     def forward(self, x):
         return self.model(x)  # No sigmoid, using BCEWithLogitsLoss
+
+
+def convert_first_conv_to_grayscale(conv: nn.Conv2d) -> nn.Conv2d:
+    """Average pretrained RGB weights so the layer accepts single-channel images."""
+
+    new_conv = nn.Conv2d(
+        in_channels=1,
+        out_channels=conv.out_channels,
+        kernel_size=conv.kernel_size,
+        stride=conv.stride,
+        padding=conv.padding,
+        bias=conv.bias is not None,
+    )
+
+    with torch.no_grad():
+        # Average RGB filters to keep the pretrained response distribution
+        new_weights = conv.weight.mean(dim=1, keepdim=True)
+        new_conv.weight.copy_(new_weights)
+        if conv.bias is not None and new_conv.bias is not None:
+            new_conv.bias.copy_(conv.bias)
+
+    return new_conv
 
 
 def collate_preprocessed(batch):
