@@ -18,14 +18,14 @@ from berlin25_xray.task import train as train_fn
 
 
 @dataclass(frozen=True)
-class LocalTrainingConfig:
+    class LocalTrainingConfig:
     """Local fine-tuning defaults used by local_train.py."""
 
     hospital: str = "A"
-    epochs: int = 3
+        epochs: int = 3
     learning_rate: float = 1e-4
-    batch_size: int = 1024
-    image_size: int = 128
+        batch_size: int = 1024
+        image_size: int = 224
     compile_model: bool = True
 
     @property
