@@ -39,6 +39,7 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 configure_logging()
 logger = logging.getLogger(__name__)
+IS_ROCM = bool(getattr(torch.version, "hip", None))
 
 
 def _configure_torch_backends():
@@ -188,11 +189,16 @@ def _suggest_num_workers():
     return min(8, max(2, cpu_count // 2))
 
 
+def _supports_channels_last(device: torch.device) -> bool:
+    return device.type == "cuda" and not IS_ROCM
+
+
 def prepare_model_for_device(model: nn.Module, device: torch.device) -> nn.Module:
     """Move a model to the target device using channel-last layout when beneficial."""
 
-    memory_format = torch.channels_last if device.type == "cuda" else torch.preserve_format
-    return model.to(device=device, memory_format=memory_format)
+    if _supports_channels_last(device):
+        return model.to(device=device, memory_format=torch.channels_last)
+    return model.to(device=device)
 
 
 def _move_batch_to_device(batch, device: torch.device):
@@ -201,7 +207,7 @@ def _move_batch_to_device(batch, device: torch.device):
     non_blocking = device.type == "cuda"
     x = batch["x"].to(device=device, non_blocking=non_blocking)
     y = batch["y"].to(device=device, non_blocking=non_blocking)
-    if device.type == "cuda":
+    if _supports_channels_last(device):
         x = x.to(memory_format=torch.channels_last)
     return x, y
 
