@@ -56,13 +56,13 @@ default = "cluster"
 
 # Local simulation federation with 3 virtual SuperNodes (one per hospital)
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 3
+options.num-supernodes = 1
 
 [tool.flwr.federations.supergrid-deployment]
 address = "supergrid.flower.ai"
 enable-account-auth = true
 
 [tool.flwr.federations.cluster]
-options.num-supernodes = 1
+options.num-supernodes = 3
 options.backend.client-resources.num-cpus = 4
 options.backend.client-resources.num-gpus = 0.33
