@@ -10,7 +10,7 @@ from berlin25_xray.task import train as train_fn
 HOSPITAL = "A"  # A, B, or C
 EPOCHS = 3
 LEARNING_RATE = 1e-4
-BATCH_SIZE = 16
+BATCH_SIZE = 512
 IMAGE_SIZE = 224
 
 
