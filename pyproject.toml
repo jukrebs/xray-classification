@@ -53,15 +53,16 @@ lr = 0.0001             # Head-only finetuning LR
 [tool.flwr.federations]
 default = "cluster"
 
-# Local simulation federation with 3 virtual SuperNodes (one per hospital)
+# Local simulation federation with a single SuperNode (Hospital A only)
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 3
+options.num-supernodes = 1
 
 [tool.flwr.federations.supergrid-deployment]
 address = "supergrid.flower.ai"
 enable-account-auth = true
 
 [tool.flwr.federations.cluster]
-options.num-supernodes = 3
+# Cluster deployment limited to one supernode (Hospital A only)
+options.num-supernodes = 1
 options.backend.client-resources.num-cpus = 4
 options.backend.client-resources.num-gpus = 0.33

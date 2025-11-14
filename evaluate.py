@@ -46,12 +46,6 @@ def main():
     print("\nEvaluating...")
     datasets_to_test = [
         ("Hospital A", "HospitalA", "eval"),
-        ("Hospital B", "HospitalB", "eval"),
-        ("Hospital C", "HospitalC", "eval"),
-        ("Test A", "Test", "test_A"),
-        ("Test B", "Test", "test_B"),
-        ("Test C", "Test", "test_C"),
-        ("Test D (OOD)", "Test", "test_D"),
     ]
 
     results = {}
