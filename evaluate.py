@@ -9,13 +9,7 @@ import torch
 import wandb
 from sklearn.metrics import roc_auc_score
 
-from berlin25_xray.task import (
-    DEFAULT_EVAL_BATCH_SIZE,
-    DEFAULT_IMAGE_SIZE,
-    Net,
-    load_data,
-    test,
-)
+from berlin25_xray.task import Net, load_data, test
 
 # Suppress W&B directory warning
 os.environ["WANDB_DIR"] = os.path.expanduser("~/.cache/wandb")
