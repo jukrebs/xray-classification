@@ -398,13 +398,24 @@ def _compute_pos_weight_from_loader(trainloader, device):
     return torch.tensor([pos_weight_value], device=device)
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+
+    def forward(self, inputs, targets):
+        bce = self.bce(inputs, targets)
+        probs = torch.sigmoid(inputs)
+        pt = probs * targets + (1 - probs) * (1 - targets)
+        focal_weight = self.alpha * (1 - pt).pow(self.gamma)
+        return (focal_weight * bce).mean()
+
+
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    pos_weight = _compute_pos_weight_from_loader(trainloader, device)
-    if pos_weight is not None:
-        criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(device)
-    else:
-        criterion = torch.nn.BCEWithLogitsLoss().to(device)
+    criterion = FocalLoss(alpha=0.25, gamma=2.0).to(device)
     if isinstance(net, Net):
         head_params = list(net.vit.heads.head.parameters())
         head_param_ids = {id(p) for p in head_params}
