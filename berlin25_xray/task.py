@@ -9,9 +9,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
-from torchvision import models
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
+from transformers import AutoImageProcessor, AutoModelForImageClassification
 
 PARTITION_HOSPITAL_MAP = {
     0: "A",
@@ -22,46 +22,43 @@ PARTITION_HOSPITAL_MAP = {
 hospital_datasets = {}  # Cache loaded hospital datasets
 
 
+CHEXPERT_CONVNEXT_MODEL_ID = "shreydan/CheXpert-5-convnextv2-tiny-384"
+
+
 class Net(nn.Module):
-    """DenseNet-121 baseline with ImageNet initialization and partial fine-tuning."""
+    """ConvNeXtV2-tiny pretrained on CheXpert, with a small head for binary 'any finding'."""
 
     def __init__(self, image_size: int = 224):
         super().__init__()
         self.target_size = image_size
-        weights = models.DenseNet121_Weights.IMAGENET1K_V1
-        backbone = models.densenet121(weights=weights)
 
-        conv0 = backbone.features.conv0
-        new_conv = nn.Conv2d(
-            1,
-            conv0.out_channels,
-            kernel_size=conv0.kernel_size,
-            stride=conv0.stride,
-            padding=conv0.padding,
-            bias=False,
+        # Load CheXpert-pretrained ConvNeXtV2-tiny
+        self.processor = AutoImageProcessor.from_pretrained(CHEXPERT_CONVNEXT_MODEL_ID)
+        self.backbone = AutoModelForImageClassification.from_pretrained(
+            CHEXPERT_CONVNEXT_MODEL_ID
         )
-        with torch.no_grad():
-            new_conv.weight.copy_(conv0.weight.mean(dim=1, keepdim=True))
-        backbone.features.conv0 = new_conv
-
-        num_features = backbone.classifier.in_features
-        backbone.classifier = nn.Linear(num_features, 1)
-        self.model = backbone
-
-        for param in self.model.parameters():
+        self.backbone.eval()
+        for param in self.backbone.parameters():
             param.requires_grad = False
-        for module in [
-            self.model.features.denseblock4,
-            self.model.features.norm5,
-            self.model.classifier,
-        ]:
-            for param in module.parameters():
-                param.requires_grad = True
+
+        num_labels = int(self.backbone.config.num_labels)
+        # Learn a lightweight head that maps the 5 CheXpert logits to a single "any finding" logit.
+        self.head = nn.Linear(num_labels, 1)
+
+        # Cache normalization stats from the image processor
+        image_mean = getattr(self.processor, "image_mean", [0.485, 0.456, 0.406])
+        image_std = getattr(self.processor, "image_std", [0.229, 0.224, 0.225])
+        mean = torch.tensor(image_mean).view(1, 3, 1, 1)
+        std = torch.tensor(image_std).view(1, 3, 1, 1)
+        self.register_buffer("image_mean", mean, persistent=False)
+        self.register_buffer("image_std", std, persistent=False)
 
     def _prepare_input(self, x: torch.Tensor) -> torch.Tensor:
+        # x is preprocessed as grayscale, normalized with mean=0.5, std=0.5 in [-1, 1].
         x = x.float()
-        if x.min() < 0 or x.max() > 1:
-            x = x * 0.5 + 0.5
+        x = x * 0.5 + 0.5  # Back to [0, 1]
+
+        # Resize if needed to match target_size
         if tuple(x.shape[-2:]) != (self.target_size, self.target_size):
             x = F.interpolate(
                 x,
@@ -69,11 +66,21 @@ class Net(nn.Module):
                 mode="bilinear",
                 align_corners=False,
             )
+
+        # ConvNeXt expects 3-channel input; repeat grayscale channel
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+
+        # Normalize using the CheXpert ConvNeXt statistics
+        x = (x - self.image_mean) / self.image_std
         return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self._prepare_input(x)
-        return self.model(x)
+        pixel_values = self._prepare_input(x)
+        outputs = self.backbone(pixel_values=pixel_values)
+        logits_5 = outputs.logits  # shape [B, num_labels]
+        logit_any = self.head(logits_5)  # shape [B, 1]
+        return logit_any
 
 
 def collate_preprocessed(batch):
@@ -126,7 +133,7 @@ def load_data(
         data,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=4,
+        num_workers=0,  # Single-process loading to avoid cluster semaphore limits
         collate_fn=collate_preprocessed,
     )
     return dataloader
