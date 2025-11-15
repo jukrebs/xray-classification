@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_from_disk
-from huggingface_hub import hf_hub_download
 from torch.utils.data import DataLoader
 from torchvision import models
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
@@ -50,19 +49,44 @@ class Net(nn.Module):
         )
 
     def _load_checkpoint(self):
-        filename = os.environ.get("XRAY_DENSENET_FILENAME", "pytorch_model.bin")
-        path = hf_hub_download(repo_id=self.repo_id, filename=filename)
-        state_dict = torch.load(path, map_location="cpu")
+        checkpoint_path = os.environ.get("XRAY_DENSENET_CHECKPOINT")
+        state_dict = None
+
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            state_dict = torch.load(checkpoint_path, map_location="cpu")
+        else:
+            candidates = [
+                os.environ.get("XRAY_DENSENET_FILENAME"),
+                "densenet121-res224-chex.pth",
+                "state_dict.pth",
+                "pytorch_model.bin",
+            ]
+            errors = []
+            for filename in candidates:
+                if not filename:
+                    continue
+                url = f"https://huggingface.co/{self.repo_id}/resolve/main/{filename}"
+                try:
+                    state_dict = torch.hub.load_state_dict_from_url(
+                        url, map_location="cpu", progress=False, check_hash=False
+                    )
+                    break
+                except Exception as exc:  # noqa: PERF203
+                    errors.append(f"{filename}: {exc}")
+            if state_dict is None:
+                raise RuntimeError(
+                    "Unable to download DenseNet checkpoint. "
+                    "Provide XRAY_DENSENET_CHECKPOINT pointing to a local .pth file. "
+                    f"Tried files: {errors}"
+                )
 
         conv_key = "features.conv0.weight"
         if conv_key in state_dict and state_dict[conv_key].shape[1] == 3:
             weight = state_dict[conv_key].mean(dim=1, keepdim=True)
             state_dict[conv_key] = weight
 
-        head_key = "classifier.weight"
-        if head_key in state_dict and state_dict[head_key].shape[0] != 1:
-            state_dict.pop("classifier.weight")
-            state_dict.pop("classifier.bias")
+        head_weight = state_dict.pop("classifier.weight", None)
+        head_bias = state_dict.pop("classifier.bias", None)
 
         self.encoder.load_state_dict(state_dict, strict=False)
 
