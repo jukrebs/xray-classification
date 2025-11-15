@@ -51,6 +51,8 @@ class Net(nn.Module):
         for param in self.model.parameters():
             param.requires_grad = False
         modules_to_unfreeze = [
+            self.model.features.denseblock2,
+            self.model.features.transition2,
             self.model.features.denseblock3,
             self.model.features.transition3,
             self.model.features.denseblock4,
