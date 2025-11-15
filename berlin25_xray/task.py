@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from torchvision import models
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
+from transformers import AutoImageProcessor, AutoModelForImageClassification
 
 PARTITION_HOSPITAL_MAP = {
     0: "A",
@@ -20,6 +21,11 @@ PARTITION_HOSPITAL_MAP = {
 }
 
 hospital_datasets = {}  # Cache loaded hospital datasets
+
+
+CHEXPERT_CONVNEXT_MODEL_ID = "shreydan/CheXpert-5-convnextv2-tiny-384"
+DISTILLATION_ALPHA = float(os.environ.get("DISTILLATION_ALPHA", "0.2"))
+DISTILLATION_PERIOD = int(os.environ.get("DISTILLATION_PERIOD", "4"))
 
 
 class DualHeadDenseNetClassifier(nn.Module):
@@ -88,6 +94,52 @@ class Net(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._prepare_input(x)
         return self.model(x)
+
+
+class CheXpertTeacher(nn.Module):
+    """Frozen ConvNeXtV2-tiny pretrained on CheXpert producing p(any finding)."""
+
+    def __init__(self, image_size: int = 224):
+        super().__init__()
+        self.target_size = image_size
+        self.processor = AutoImageProcessor.from_pretrained(CHEXPERT_CONVNEXT_MODEL_ID)
+        self.backbone = AutoModelForImageClassification.from_pretrained(
+            CHEXPERT_CONVNEXT_MODEL_ID
+        )
+        self.backbone.eval()
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+        image_mean = getattr(self.processor, "image_mean", [0.485, 0.456, 0.406])
+        image_std = getattr(self.processor, "image_std", [0.229, 0.224, 0.225])
+        mean = torch.tensor(image_mean).view(1, 3, 1, 1)
+        std = torch.tensor(image_std).view(1, 3, 1, 1)
+        self.register_buffer("image_mean", mean, persistent=False)
+        self.register_buffer("image_std", std, persistent=False)
+
+    def _prepare_input(self, x: torch.Tensor) -> torch.Tensor:
+        # x is grayscale, normalized with mean=0.5, std=0.5 in [-1, 1]
+        x = x.float()
+        x = x * 0.5 + 0.5  # back to [0, 1]
+        if tuple(x.shape[-2:]) != (self.target_size, self.target_size):
+            x = F.interpolate(
+                x,
+                size=(self.target_size, self.target_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+        x = (x - self.image_mean) / self.image_std
+        return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pixel_values = self._prepare_input(x)
+        outputs = self.backbone(pixel_values=pixel_values)
+        logits_5 = outputs.logits  # [B, 5]
+        probs_5 = torch.sigmoid(logits_5)
+        p_any = 1.0 - torch.prod(1.0 - probs_5, dim=1, keepdim=True)
+        return p_any
 
 
 def collate_preprocessed(batch):
@@ -168,13 +220,27 @@ def train(net, trainloader, epochs, lr, device):
     )
     net.train()
     running_loss = 0.0
-    for _ in range(epochs):
-        for batch in tqdm(trainloader):
+    use_distillation = DISTILLATION_ALPHA > 0.0 and DISTILLATION_PERIOD > 0
+    teacher: Optional[CheXpertTeacher] = None
+    if use_distillation:
+        image_size = getattr(net, "target_size", 224)
+        teacher = CheXpertTeacher(image_size=image_size).to(device)
+        teacher.eval()
+    for epoch in range(epochs):
+        for batch_idx, batch in enumerate(
+            tqdm(trainloader, desc=f"Epoch {epoch + 1}/{epochs}")
+        ):
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
             optimizer.zero_grad()
             outputs = net(x)
             loss = criterion(outputs, y)
+            if use_distillation and teacher is not None and (batch_idx % DISTILLATION_PERIOD == 0):
+                with torch.no_grad():
+                    teacher_probs = teacher(x).detach()
+                student_probs = torch.sigmoid(outputs)
+                distill_loss = torch.mean((student_probs - teacher_probs) ** 2)
+                loss = loss + DISTILLATION_ALPHA * distill_loss
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
