@@ -3,6 +3,7 @@ import subprocess
 import sys
 from logging import INFO
 
+import torch
 import wandb
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.common import log, ndarrays_to_parameters, parameters_to_ndarrays
@@ -74,10 +75,20 @@ def main(grid: Grid, context: Context) -> None:
     log(INFO, "Wandb initialized with run_id: %s", wandb.run.id)
 
     if initial_parameters is None:
+        # Starting from scratch - initialize with fresh model
         global_model = Net()
         arrays = ArrayRecord(global_model.state_dict())
     else:
-        arrays = None
+        # Resuming from checkpoint - convert Parameters to ArrayRecord
+        param_arrays = parameters_to_ndarrays(initial_parameters)
+        global_model = Net()
+        state_dict = global_model.state_dict()
+        
+        # Load the checkpoint parameters into the state dict
+        for (key, _), param_array in zip(state_dict.items(), param_arrays):
+            state_dict[key] = torch.from_numpy(param_array)
+        
+        arrays = ArrayRecord(state_dict)
 
     target_round = start_round + num_rounds - 1
     strategy = HackathonFedAvg(
@@ -89,7 +100,7 @@ def main(grid: Grid, context: Context) -> None:
     )
     strategy.start(
         grid=grid,
-        initial_arrays=arrays if arrays else None,
+        initial_arrays=arrays,
         train_config=ConfigRecord({"lr": lr}),
         num_rounds=num_rounds,
     )

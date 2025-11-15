@@ -4,21 +4,17 @@ Usage: python evaluate.py
 """
 
 import os
+import pickle
 
 import torch
-import wandb
 from sklearn.metrics import roc_auc_score
 
 from berlin25_xray.task import Net, load_data, test
 
-# Suppress W&B directory warning
-os.environ["WANDB_DIR"] = os.path.expanduser("~/.cache/wandb")
-
-# W&B model path: update with your best model
-# Format: "your-wandb-username/your-project-name/model-artifact-name:version"
-WANDB_MODEL_PATH = "justus-krebs-technische-universit-t-berlin/hackathon/vt:v0"
+# Local model path
+MODEL_PATH = "/home/team01/coldstart_runs/flower_bigmodel/server_round_0003.pt"
 DATASET_DIR = os.environ["DATASET_DIR"]
-
+    
 
 def evaluate_split(model, dataset_name, split_name, device):
     """Evaluate on any dataset split."""
@@ -32,14 +28,22 @@ def main():
     print("MODEL EVALUATION")
     print("=" * 80)
 
-    print(f"\nLoading {WANDB_MODEL_PATH}...")
-    artifact = wandb.Api().artifact(WANDB_MODEL_PATH)
-    artifact_dir = artifact.download(root=os.environ["WANDB_DIR"] + "/artifacts")
-    model_path = next(p for p in __import__("pathlib").Path(artifact_dir).glob("*.pt"))
-
-    # Load model
+    print(f"\nLoading {MODEL_PATH}...")
+    
+    # Load Flower checkpoint
+    with open(MODEL_PATH, "rb") as f:
+        ckpt_data = pickle.load(f)
+    
+    # Convert numpy arrays to PyTorch tensors and create state dict
+    param_arrays = ckpt_data["parameters"]
     model = Net()
-    model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+    state_dict = {}
+    param_keys = list(model.state_dict().keys())
+    
+    for i, key in enumerate(param_keys):
+        state_dict[key] = torch.from_numpy(param_arrays[i])
+    
+    model.load_state_dict(state_dict)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     print(f"Model loaded on {device}.")
