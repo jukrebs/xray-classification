@@ -40,7 +40,8 @@ def main(grid: Grid, context: Context) -> None:
     except Exception:
         branch, commit = "unknown", "unknown"
 
-    wandb_run_name = f"{branch}-{commit}"
+    safe_branch = branch.replace("/", "-")
+    wandb_run_name = f"{safe_branch}-{commit}"
 
     # W&B auth and project/entity are configured via environment variables
     wandb.login()
