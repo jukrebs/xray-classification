@@ -105,6 +105,17 @@ def collate_preprocessed(batch):
     return result
 
 
+def _augment_train_batch(x: torch.Tensor) -> torch.Tensor:
+    """Apply cheap, X-ray-safe augmentations in tensor space."""
+    if torch.rand(1).item() < 0.5:
+        x = torch.flip(x, dims=[3])
+    if torch.rand(1).item() < 0.8:
+        brightness = (torch.rand(1, device=x.device) - 0.5) * 0.2
+        contrast = 1.0 + (torch.rand(1, device=x.device) - 0.5) * 0.2
+        x = torch.clamp(x * contrast + brightness, -1.0, 1.0)
+    return x
+
+
 def load_data(
     dataset_name: str,
     split_name: str,
@@ -172,6 +183,7 @@ def train(net, trainloader, epochs, lr, device):
         for batch in tqdm(trainloader):
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
+            x = _augment_train_batch(x)
             optimizer.zero_grad()
             outputs = net(x)
             loss = criterion(outputs, y)
@@ -207,6 +219,8 @@ def test(net, testloader, device):
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
             outputs = net(x)
+            outputs_flip = net(torch.flip(x, dims=[3]))
+            outputs = 0.5 * (outputs + outputs_flip)
             loss = criterion(outputs, y)
             total_loss += loss.item()
 
