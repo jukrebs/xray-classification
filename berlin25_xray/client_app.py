@@ -16,6 +16,11 @@ def train(msg: Message, context: Context):
     # Load the model and initialize it with the received weights
     model = Net()
     model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+    if hasattr(torch, "compile"):
+        try:
+            model = torch.compile(model, mode="max-autotune")
+        except Exception as err:
+            print(f"torch.compile failed, continuing with eager mode: {err}")
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
     model.to(device)
@@ -52,6 +57,11 @@ def evaluate(msg: Message, context: Context):
     """Evaluate the model on local data."""
     model = Net()
     model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+    if hasattr(torch, "compile"):
+        try:
+            model = torch.compile(model, mode="max-autotune")
+        except Exception as err:
+            print(f"torch.compile failed during evaluation: {err}")
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
 

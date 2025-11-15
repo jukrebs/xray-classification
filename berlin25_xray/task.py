@@ -1,15 +1,16 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
 import os
-from typing import Optional
+import warnings
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_from_disk
+from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-from torchvision import models
+from torchvision.models import ConvNeXt_Tiny_Weights, convnext_tiny
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
 
@@ -23,36 +24,44 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 
 class Net(nn.Module):
-    """DenseNet-121 baseline with ImageNet initialization and partial fine-tuning."""
+    """ConvNeXt-Tiny backbone with ImageNet weights and grayscale adaptation."""
 
     def __init__(self, image_size: int = 224):
         super().__init__()
         self.target_size = image_size
-        weights = models.DenseNet121_Weights.IMAGENET1K_V1
-        backbone = models.densenet121(weights=weights)
+        weights = ConvNeXt_Tiny_Weights.IMAGENET1K_V1
+        try:
+            backbone = convnext_tiny(weights=weights)
+        except Exception as err:  # pragma: no cover - offline fallback
+            warnings.warn(
+                f"Falling back to randomly initialized ConvNeXt-Tiny "
+                f"because ImageNet weights could not be downloaded ({err})."
+            )
+            backbone = convnext_tiny(weights=None)
 
-        conv0 = backbone.features.conv0
+        first_conv = backbone.features[0][0]
         new_conv = nn.Conv2d(
             1,
-            conv0.out_channels,
-            kernel_size=conv0.kernel_size,
-            stride=conv0.stride,
-            padding=conv0.padding,
-            bias=False,
+            first_conv.out_channels,
+            kernel_size=first_conv.kernel_size,
+            stride=first_conv.stride,
+            padding=first_conv.padding,
+            bias=first_conv.bias is not None,
         )
         with torch.no_grad():
-            new_conv.weight.copy_(conv0.weight.mean(dim=1, keepdim=True))
-        backbone.features.conv0 = new_conv
+            new_conv.weight.copy_(first_conv.weight.mean(dim=1, keepdim=True))
+            if first_conv.bias is not None:
+                new_conv.bias.copy_(first_conv.bias)
+        backbone.features[0][0] = new_conv
 
-        num_features = backbone.classifier.in_features
-        backbone.classifier = nn.Linear(num_features, 1)
+        num_features = backbone.classifier[2].in_features
+        backbone.classifier[2] = nn.Linear(num_features, 1)
         self.model = backbone
 
         for param in self.model.parameters():
             param.requires_grad = False
         for module in [
-            self.model.features.denseblock4,
-            self.model.features.norm5,
+            self.model.features[-1],
             self.model.classifier,
         ]:
             for param in module.parameters():
@@ -74,6 +83,37 @@ class Net(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._prepare_input(x)
         return self.model(x)
+
+
+class FocalLoss(nn.Module):
+    """Binary focal loss to focus training on hard examples."""
+
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "mean"):
+        super().__init__()
+        self.alpha = torch.tensor([1 - alpha, alpha])
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        targets = targets.float()
+        bce_loss = F.binary_cross_entropy_with_logits(
+            inputs, targets, reduction="none"
+        )
+
+        if self.alpha.device != inputs.device:
+            self.alpha = self.alpha.to(inputs.device)
+
+        probs = torch.sigmoid(inputs)
+        pt = torch.where(targets == 1.0, probs, 1 - probs)
+        alpha_t = torch.where(targets == 1.0, self.alpha[1], self.alpha[0])
+        focal_weight = (1 - pt).pow(self.gamma)
+        loss = alpha_t * focal_weight * bce_loss
+
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
 
 
 def collate_preprocessed(batch):
@@ -132,38 +172,31 @@ def load_data(
     return dataloader
 
 
-class LabelSmoothingBCELoss(nn.Module):
-    """Binary cross-entropy with light label smoothing to improve calibration."""
-
-    def __init__(self, smoothing: float = 0.05):
-        super().__init__()
-        self.smoothing = float(smoothing)
-        self.bce = nn.BCEWithLogitsLoss()
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        smooth = self.smoothing
-        # Move targets slightly towards 0.5 to reduce overconfidence
-        targets_smoothed = targets * (1.0 - smooth) + 0.5 * smooth
-        return self.bce(inputs, targets_smoothed)
-
-
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    criterion = LabelSmoothingBCELoss(smoothing=0.05).to(device)
+    criterion = FocalLoss(alpha=0.25, gamma=2.0).to(device)
     optimizer = torch.optim.AdamW(
         (p for p in net.parameters() if p.requires_grad), lr=lr, weight_decay=0.01
     )
+    use_amp = device.type == "cuda"
+    scaler = GradScaler(enabled=use_amp)
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
         for batch in tqdm(trainloader):
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
-            optimizer.zero_grad()
-            outputs = net(x)
-            loss = criterion(outputs, y)
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(enabled=use_amp, dtype=torch.float16):
+                outputs = net(x)
+                loss = criterion(outputs, y)
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             running_loss += loss.item()
     avg_loss = running_loss / (len(trainloader) * epochs)
     return avg_loss

@@ -1,12 +1,17 @@
 import os
 import subprocess
-from logging import INFO
+from logging import INFO, WARNING
 
 import wandb
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
+
+try:
+    from flwr.server.strategy import Scaffold as BaseScaffold
+except ImportError:  # pragma: no cover - optional dependency
+    BaseScaffold = None
 
 from berlin25_xray.task import Net
 from berlin25_xray.util import (
@@ -65,14 +70,29 @@ def main(grid: Grid, context: Context) -> None:
     global_model = Net(image_size=image_size)
     arrays = ArrayRecord(global_model.state_dict())
 
-    strategy = HackathonFedAvg(
-        fraction_train=1,
-        fraction_evaluate=1,
-        min_train_nodes=1,
-        min_evaluate_nodes=1,
-        min_available_nodes=1,
-        run_name=wandb_run_name,
-    )
+    if BaseScaffold is None:
+        log(
+            WARNING,
+            "Scaffold strategy is unavailable in the current Flower version. "
+            "Falling back to FedAvg.",
+        )
+        strategy = HackathonFedAvg(
+            fraction_train=1,
+            fraction_evaluate=1,
+            min_train_nodes=1,
+            min_evaluate_nodes=1,
+            min_available_nodes=1,
+            run_name=wandb_run_name,
+        )
+    else:
+        strategy = HackathonScaffold(
+            fraction_train=1,
+            fraction_evaluate=1,
+            min_train_nodes=3,
+            min_evaluate_nodes=3,
+            min_available_nodes=3,
+            run_name=wandb_run_name,
+        )
     result = strategy.start(
         grid=grid,
         initial_arrays=arrays,
@@ -120,3 +140,42 @@ class HackathonFedAvg(FedAvg):
             log(INFO, msg)
 
         return agg_metrics
+
+
+if BaseScaffold is not None:
+
+    class HackathonScaffold(BaseScaffold):  # pragma: no cover - requires newer Flower
+        """Scaffold strategy with W&B logging/best-model tracking."""
+
+        def __init__(self, *args, run_name=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._best_auroc = {}
+            self._run_name = run_name or "your_run"
+
+        def aggregate_train(self, server_round, replies):
+            arrays, metrics = super().aggregate_train(server_round, replies)
+            self._arrays = arrays
+            log_training_metrics(replies, server_round)
+            return arrays, metrics
+
+        def aggregate_evaluate(self, server_round, replies):
+            agg_metrics = compute_aggregated_metrics(replies)
+            log_eval_metrics(
+                replies,
+                agg_metrics,
+                server_round,
+                self.weighted_by_key,
+                lambda msg: log(INFO, msg),
+            )
+
+            if hasattr(self, "_arrays"):
+                saved, msg = save_best_model(
+                    self._arrays,
+                    agg_metrics,
+                    server_round,
+                    self._run_name,
+                    self._best_auroc,
+                )
+                log(INFO, msg)
+
+            return agg_metrics
