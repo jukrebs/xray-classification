@@ -16,7 +16,7 @@ os.environ["WANDB_DIR"] = os.path.expanduser("~/.cache/wandb")
 
 # W&B model path: update with your best model
 # Format: "your-wandb-username/your-project-name/model-artifact-name:version"
-WANDB_MODEL_PATH = "justus-krebs-technische-universit-t-berlin/hackathon/vt:v0"
+WANDB_MODEL_PATH = "justus-krebs-technische-universit-t-berlin/hackathon/job1266_dense_feder_uf128_round2_auroc7675:v0"
 DATASET_DIR = os.environ["DATASET_DIR"]
 
 
@@ -33,8 +33,9 @@ def main():
     print("=" * 80)
 
     print(f"\nLoading {WANDB_MODEL_PATH}...")
-    artifact = wandb.Api().artifact(WANDB_MODEL_PATH)
-    artifact_dir = artifact.download(root=os.environ["WANDB_DIR"] + "/artifacts")
+    run = wandb.init()
+    artifact = run.use_artifact(WANDB_MODEL_PATH, type="model")
+    artifact_dir = artifact.download()
     model_path = next(p for p in __import__("pathlib").Path(artifact_dir).glob("*.pt"))
 
     # Load model
@@ -43,6 +44,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     print(f"Model loaded on {device}.")
+
+    # Save model to disk for further use
+    saved_model_path = os.path.expanduser("~/models/uf128_round2.pt")
+    torch.save(model.state_dict(), saved_model_path)
+    print(f"Model saved to {saved_model_path}")
 
     # Evaluate
     print("\nEvaluating...")
