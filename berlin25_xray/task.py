@@ -32,7 +32,7 @@ DEFAULT_BATCH_SIZE = 16
 DEFAULT_EVAL_BATCH_SIZE = 32
 
 # ViT tuning hyperparameters
-VIT_TUNE_LAST_N_LAYERS = 4
+VIT_TUNE_LAST_N_LAYERS = 0
 VIT_BACKBONE_LR_SCALE = 0.1  # backbone LR = head LR * scale
 
 PARTITION_HOSPITAL_MAP = {
@@ -415,13 +415,25 @@ def _compute_pos_weight_from_loader(trainloader, device):
     return torch.tensor([pos_weight_value], device=device)
 
 
+class LabelSmoothingBCELoss(nn.Module):
+    """Binary cross-entropy with small label smoothing for better calibration."""
+
+    def __init__(self, smoothing: float = 0.05):
+        super().__init__()
+        self.smoothing = float(smoothing)
+        self.bce = nn.BCEWithLogitsLoss()
+
+    def forward(self, inputs, targets):
+        smooth = self.smoothing
+        # Move targets slightly towards 0.5 to reduce overconfidence
+        targets_smoothed = targets * (1.0 - smooth) + 0.5 * smooth
+        return self.bce(inputs, targets_smoothed)
+
+
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    pos_weight = _compute_pos_weight_from_loader(trainloader, device)
-    if pos_weight is not None:
-        criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(device)
-    else:
-        criterion = torch.nn.BCEWithLogitsLoss().to(device)
+    # Use label-smoothed BCE (no pos_weight) to focus on ranking and calibration
+    criterion = LabelSmoothingBCELoss(smoothing=0.05).to(device)
     if isinstance(net, Net):
         head_params = list(net.vit.heads.head.parameters())
         head_param_ids = {id(p) for p in head_params}
@@ -548,7 +560,7 @@ def train(net, trainloader, epochs, lr, device):
                     x = x.clamp(-1.0, 1.0)
 
                 # Mixup augmentation (cheap, improves ranking/AUROC)
-                mixup_alpha = 0.2
+                mixup_alpha = 0.4
                 if mixup_alpha > 0.0 and x.size(0) > 1:
                     lam = float(np.random.beta(mixup_alpha, mixup_alpha))
                     perm = torch.randperm(x.size(0), device=device)
@@ -604,7 +616,7 @@ def train(net, trainloader, epochs, lr, device):
     return avg_loss
 
 
-def test(net, testloader, device, use_tta: bool = True):
+def test(net, testloader, device, use_tta: bool = False):
     """Evaluate the model on the test set (binary classification).
 
     Returns:
