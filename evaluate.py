@@ -5,6 +5,7 @@ Usage: python evaluate.py
 
 import os
 
+import numpy as np
 import torch
 from sklearn.metrics import roc_auc_score
 
@@ -14,10 +15,10 @@ DATASET_DIR = os.environ["DATASET_DIR"]
 
 
 def evaluate_split(model, dataset_name, split_name, device):
-    """Evaluate on any dataset split."""
+    """Evaluate on any dataset split and return predictions."""
     loader = load_data(dataset_name, split_name, batch_size=32)
     _, _, _, _, _, probs, labels = test(model, loader, device)
-    return roc_auc_score(labels, probs), len(loader.dataset)
+    return probs, labels
 
 
 def main():
@@ -47,25 +48,44 @@ def main():
         ("Test D (OOD)", "Test", "test_D"),
     ]
 
-    results = {}
+    # Collect all predictions
+    hospital_predictions = {}
+    test_predictions = {}
     for display_name, dataset_name, split_name in datasets_to_test:
         try:
-            auroc, n = evaluate_split(model, dataset_name, split_name, device)
-            results[display_name] = (auroc, n)
+            probs, labels = evaluate_split(model, dataset_name, split_name, device)
+            n = len(labels)
+
+            # Compute per-dataset AUROC for display
+            auroc = roc_auc_score(labels, probs)
             print(f"  {display_name:<15} AUROC: {auroc:.4f} (n={n})")
+
+            # Store predictions for aggregated AUROC calculation
+            if display_name.startswith("Hospital"):
+                hospital_predictions[display_name] = (probs, labels)
+            elif display_name.startswith("Test"):
+                test_predictions[display_name] = (probs, labels)
         except FileNotFoundError:
             # Test dataset doesn't exist for participants - skip silently
             pass
 
-    # Weighted average for Hospital eval splits
-    hospital_results = [
-        (a, n) for name, (a, n) in results.items() if name.startswith("Hospital")
-    ]
-    if hospital_results:
-        weighted_auroc = sum(a * n for a, n in hospital_results) / sum(
-            n for _, n in hospital_results
+    # Eval Average: pool all hospital eval predictions, then compute AUROC
+    if hospital_predictions:
+        all_probs = np.concatenate(
+            [probs for probs, _ in hospital_predictions.values()]
         )
-        print(f"  {'Weighted Avg':<15} AUROC: {weighted_auroc:.4f}")
+        all_labels = np.concatenate(
+            [labels for _, labels in hospital_predictions.values()]
+        )
+        eval_auroc = roc_auc_score(all_labels, all_probs)
+        print(f"  {'Eval Avg':<15} AUROC: {eval_auroc:.4f}")
+
+    # Test Average: pool all test predictions, then compute AUROC
+    if test_predictions:
+        all_probs = np.concatenate([probs for probs, _ in test_predictions.values()])
+        all_labels = np.concatenate([labels for _, labels in test_predictions.values()])
+        test_auroc = roc_auc_score(all_labels, all_probs)
+        print(f"  {'Test Avg':<15} AUROC: {test_auroc:.4f}")
 
     print("\n" + "=" * 80)
     return 0
