@@ -39,6 +39,8 @@ class Net(nn.Module):
         self.encoder = AutoModel.from_pretrained(
             self.model_name, trust_remote_code=trust_remote_code
         )
+        for param in self.encoder.parameters():
+            param.requires_grad = False
 
         hidden_size = getattr(self.encoder.config, "hidden_size", None) or getattr(
             self.encoder.config, "embed_dim", None
@@ -163,7 +165,11 @@ def load_data(
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(
+        (p for p in net.parameters() if p.requires_grad),
+        lr=lr,
+        weight_decay=0.01,
+    )
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
