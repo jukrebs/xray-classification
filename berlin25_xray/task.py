@@ -647,16 +647,8 @@ def test(net, testloader, device):
                 loss = criterion(outputs, y)
             total_loss += loss.item()
 
-            # Get predictions and probabilities
+            # Get predictions and probabilities (no test-time augmentation for speed)
             probs = torch.sigmoid(outputs)
-
-            # Simple test-time augmentation: horizontal flip
-            x_flip = torch.flip(x, dims=[3])
-            with autocast_ctx:
-                outputs_flip = net(x_flip)
-            probs_flip = torch.sigmoid(outputs_flip)
-
-            probs = 0.5 * (probs + probs_flip)
             predictions = (probs > 0.5).float()
 
             # Store for metric calculation
