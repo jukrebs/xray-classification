@@ -25,7 +25,7 @@ class LocalTrainingConfig:
     epochs: int = 3
     learning_rate: float = 1e-4
     batch_size: int = 1024
-    image_size: int = 128
+    image_size: int = 224
     compile_model: bool = True
 
     @property
