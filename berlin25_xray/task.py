@@ -2,6 +2,7 @@
 
 import os
 from typing import Optional
+import contextlib
 
 import numpy as np
 import torch
@@ -19,6 +20,44 @@ PARTITION_HOSPITAL_MAP = {
 }
 
 hospital_datasets = {}  # Cache loaded hospital datasets
+
+
+def _get_amp_policy(device: torch.device):
+    """Return (use_amp, amp_dtype, use_grad_scaler) for the given device.
+
+    On modern GPUs (including AMD MI300X via ROCm), prefer bfloat16 for
+    stability and performance and disable gradient scaling in that case.
+    """
+    if device.type != "cuda":
+        return False, None, False
+
+    use_bf16 = False
+    if hasattr(torch.cuda, "is_bf16_supported"):
+        try:
+            use_bf16 = torch.cuda.is_bf16_supported()
+        except Exception:
+            use_bf16 = False
+
+    if use_bf16:
+        amp_dtype = torch.bfloat16
+        use_grad_scaler = False
+    else:
+        amp_dtype = torch.float16
+        use_grad_scaler = True
+
+    return True, amp_dtype, use_grad_scaler
+
+
+def _autocast(device: torch.device, enabled: bool, dtype):
+    """Return an autocast context manager for the given device/dtype."""
+    if not enabled:
+        return contextlib.nullcontext()
+
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast(device_type=device.type, dtype=dtype)
+
+    # Fallback to legacy CUDA AMP API
+    return torch.cuda.amp.autocast(dtype=dtype, enabled=enabled)
 
 
 class DualHeadDenseNetClassifier(nn.Module):
@@ -169,19 +208,23 @@ def train(net, trainloader, epochs, lr, device):
     )
     net.train()
     running_loss = 0.0
-    use_amp = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    use_amp, amp_dtype, use_grad_scaler = _get_amp_policy(device)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_grad_scaler)
     for _ in range(epochs):
         for batch in trainloader:
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with _autocast(device, enabled=use_amp, dtype=amp_dtype):
                 outputs = net(x)
                 loss = criterion(outputs, y)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            if use_grad_scaler:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             running_loss += loss.item()
     avg_loss = running_loss / (len(trainloader) * epochs)
     return avg_loss
@@ -207,14 +250,14 @@ def test(net, testloader, device, max_batches: Optional[int] = None):
     all_probs = []
     all_predictions = []
     all_labels = []
-    use_amp = device.type == "cuda"
+    use_amp, amp_dtype, _ = _get_amp_policy(device)
     with torch.no_grad():
         for batch_idx, batch in enumerate(testloader):
             if max_batches is not None and batch_idx >= max_batches:
                 break
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with _autocast(device, enabled=use_amp, dtype=amp_dtype):
                 outputs = net(x)
                 loss = criterion(outputs, y)
             total_loss += loss.item()
