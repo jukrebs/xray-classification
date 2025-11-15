@@ -267,7 +267,7 @@ def test(net, testloader, device, max_batches: Optional[int] = None):
             predictions = (probs > 0.5).float()
 
             # Store for metric calculation
-            all_probs.append(probs.cpu().numpy())
+            all_probs.append(probs.float().cpu().numpy())
             all_predictions.append(predictions.cpu().numpy())
             all_labels.append(y.cpu().numpy())
 
