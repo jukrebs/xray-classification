@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_from_disk
+from pathlib import Path
 from torch.utils.data import DataLoader
 from torchvision import models
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
@@ -49,20 +50,31 @@ class Net(nn.Module):
         )
 
     def _load_checkpoint(self):
-        checkpoint_path = os.environ.get("XRAY_DENSENET_CHECKPOINT")
         state_dict = None
+        repo_root = Path(__file__).resolve().parent.parent
+        local_candidates = [
+            os.environ.get("XRAY_DENSENET_CHECKPOINT"),
+            repo_root / "model.pt",
+            repo_root / "densenet121-res224-chex.pth",
+        ]
 
-        if checkpoint_path and os.path.exists(checkpoint_path):
-            state_dict = torch.load(checkpoint_path, map_location="cpu")
-        else:
-            candidates = [
+        for candidate in local_candidates:
+            if not candidate:
+                continue
+            candidate_path = Path(candidate)
+            if candidate_path.exists():
+                state_dict = torch.load(candidate_path, map_location="cpu")
+                break
+
+        if state_dict is None:
+            remote_candidates = [
                 os.environ.get("XRAY_DENSENET_FILENAME"),
                 "densenet121-res224-chex.pth",
                 "state_dict.pth",
                 "pytorch_model.bin",
             ]
             errors = []
-            for filename in candidates:
+            for filename in remote_candidates:
                 if not filename:
                     continue
                 url = f"https://huggingface.co/{self.repo_id}/resolve/main/{filename}"
