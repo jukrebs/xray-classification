@@ -22,6 +22,20 @@ PARTITION_HOSPITAL_MAP = {
 hospital_datasets = {}  # Cache loaded hospital datasets
 
 
+class DualHeadDenseNetClassifier(nn.Module):
+    """Two independent linear heads on top of DenseNet features, averaged at logit level."""
+
+    def __init__(self, in_features: int):
+        super().__init__()
+        self.head1 = nn.Linear(in_features, 1)
+        self.head2 = nn.Linear(in_features, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logit1 = self.head1(x)
+        logit2 = self.head2(x)
+        return 0.5 * (logit1 + logit2)
+
+
 class Net(nn.Module):
     """DenseNet-121 baseline with ImageNet initialization and partial fine-tuning."""
 
@@ -45,7 +59,7 @@ class Net(nn.Module):
         backbone.features.conv0 = new_conv
 
         num_features = backbone.classifier.in_features
-        backbone.classifier = nn.Linear(num_features, 1)
+        backbone.classifier = DualHeadDenseNetClassifier(num_features)
         self.model = backbone
 
         for param in self.model.parameters():
@@ -132,9 +146,23 @@ def load_data(
     return dataloader
 
 
+class LabelSmoothingBCELoss(nn.Module):
+    """Binary cross-entropy with light label smoothing to improve calibration."""
+
+    def __init__(self, smoothing: float = 0.05):
+        super().__init__()
+        self.smoothing = float(smoothing)
+        self.bce = nn.BCEWithLogitsLoss()
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        smooth = self.smoothing
+        targets_smoothed = targets * (1.0 - smooth) + 0.5 * smooth
+        return self.bce(inputs, targets_smoothed)
+
+
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    criterion = torch.nn.BCEWithLogitsLoss().to(device)
+    criterion = LabelSmoothingBCELoss(smoothing=0.05).to(device)
     optimizer = torch.optim.AdamW(
         (p for p in net.parameters() if p.requires_grad), lr=lr, weight_decay=0.01
     )
