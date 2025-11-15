@@ -8,10 +8,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_from_disk
+from huggingface_hub import hf_hub_download
 from torch.utils.data import DataLoader
+from torchvision import models
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
-from transformers import AutoModel
 
 PARTITION_HOSPITAL_MAP = {
     0: "A",
@@ -23,46 +24,47 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 
 class Net(nn.Module):
-    """DenseNet-based encoder from TorchXRayVision with binary classifier."""
+    """DenseNet-121 initialized from TorchXRayVision weights with binary head."""
 
-    def __init__(
-        self, model_name: Optional[str] = None, trust_remote_code: Optional[bool] = None
-    ):
+    def __init__(self, model_name: Optional[str] = None):
         super().__init__()
-        self.model_name = model_name or os.environ.get(
+        self.repo_id = model_name or os.environ.get(
             "XRAY_DENSENET_MODEL", "torchxrayvision/densenet121-res224-chex"
         )
-        if trust_remote_code is None:
-            env_flag = os.environ.get("XRAY_TRUST_REMOTE_CODE", "true").lower()
-            trust_remote_code = env_flag in {"1", "true", "yes"}
-        self.encoder = AutoModel.from_pretrained(
-            self.model_name,
-            trust_remote_code=trust_remote_code,
-            torch_dtype="auto",
-        )
-        hidden_size = getattr(self.encoder.config, "hidden_size", None) or getattr(
-            self.encoder.config, "embed_dim", None
-        )
-        if hidden_size is None:
-            raise ValueError(
-                "Unable to determine hidden size for DenseNet encoder configuration."
-        )
-
-        head_hidden = max(512, hidden_size // 2)
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(hidden_size),
-            nn.Dropout(p=0.1),
-            nn.Linear(hidden_size, head_hidden),
-            nn.GELU(),
-            nn.Dropout(p=0.1),
-            nn.Linear(head_hidden, 1),
-        )
-
         self.target_size = int(os.environ.get("XRAY_DENSENET_SIZE", 224))
-        mean = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
-        std = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
-        self.register_buffer("processor_mean", mean)
-        self.register_buffer("processor_std", std)
+
+        self.encoder = models.densenet121(weights=None)
+        self.encoder.features.conv0 = nn.Conv2d(
+            1, 64, kernel_size=7, stride=2, padding=3, bias=False
+        )
+        num_features = self.encoder.classifier.in_features
+        self.encoder.classifier = nn.Linear(num_features, 1)
+
+        self._load_checkpoint()
+
+        self.register_buffer(
+            "processor_mean", torch.tensor([0.5], dtype=torch.float32).view(1, 1, 1, 1)
+        )
+        self.register_buffer(
+            "processor_std", torch.tensor([0.5], dtype=torch.float32).view(1, 1, 1, 1)
+        )
+
+    def _load_checkpoint(self):
+        filename = os.environ.get("XRAY_DENSENET_FILENAME", "pytorch_model.bin")
+        path = hf_hub_download(repo_id=self.repo_id, filename=filename)
+        state_dict = torch.load(path, map_location="cpu")
+
+        conv_key = "features.conv0.weight"
+        if conv_key in state_dict and state_dict[conv_key].shape[1] == 3:
+            weight = state_dict[conv_key].mean(dim=1, keepdim=True)
+            state_dict[conv_key] = weight
+
+        head_key = "classifier.weight"
+        if head_key in state_dict and state_dict[head_key].shape[0] != 1:
+            state_dict.pop("classifier.weight")
+            state_dict.pop("classifier.bias")
+
+        self.encoder.load_state_dict(state_dict, strict=False)
 
     def _prepare_pixel_values(self, x: torch.Tensor) -> torch.Tensor:
         x = x.float()
@@ -70,8 +72,8 @@ class Net(nn.Module):
         if (x_detached.min() < 0) or (x_detached.max() > 1):
             x = x * 0.5 + 0.5
         x = torch.clamp(x, 0.0, 1.0)
-        if x.shape[1] != 3:
-            x = x.repeat(1, 3, 1, 1)
+        if x.shape[1] != 1:
+            x = x.mean(dim=1, keepdim=True)
         if tuple(x.shape[-2:]) != (self.target_size, self.target_size):
             x = F.interpolate(
                 x,
@@ -83,14 +85,7 @@ class Net(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         pixel_values = self._prepare_pixel_values(x)
-        outputs = self.encoder(pixel_values=pixel_values)
-        if getattr(outputs, "pooler_output", None) is not None:
-            features = outputs.pooler_output
-        elif getattr(outputs, "last_hidden_state", None) is not None:
-            features = outputs.last_hidden_state[:, 0]
-        else:
-            features = outputs[0][:, 0]
-        return self.classifier(features)
+        return self.encoder(pixel_values)
 
 
 def collate_preprocessed(batch):
