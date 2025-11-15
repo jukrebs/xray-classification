@@ -46,9 +46,9 @@ clientapp = "berlin25_xray.client_app:app"
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
 image-size = 224        # Image size (128 or 224)
-num-server-rounds = 100 # Slurm processes are capped to 15min
+num-server-rounds = 2   # Explicitly run two rounds (fits 20min)
 local-epochs = 1
-lr = 0.001
+lr = 0.0005             # Slightly lower LR for ResNet head-only
 
 # Default federation to use when running the app
 [tool.flwr.federations]

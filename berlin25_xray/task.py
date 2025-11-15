@@ -23,40 +23,37 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 
 class Net(nn.Module):
-    """DenseNet-121 baseline with ImageNet initialization and partial fine-tuning."""
+    """ResNet-50 baseline with ImageNet initialization and head-only fine-tuning."""
 
     def __init__(self, image_size: int = 224):
         super().__init__()
         self.target_size = image_size
-        weights = models.DenseNet121_Weights.IMAGENET1K_V1
-        backbone = models.densenet121(weights=weights)
+        weights = models.ResNet50_Weights.IMAGENET1K_V2
+        backbone = models.resnet50(weights=weights)
 
-        conv0 = backbone.features.conv0
+        # Adapt first conv to 1-channel X-ray by averaging RGB kernels.
+        conv1 = backbone.conv1
         new_conv = nn.Conv2d(
             1,
-            conv0.out_channels,
-            kernel_size=conv0.kernel_size,
-            stride=conv0.stride,
-            padding=conv0.padding,
+            conv1.out_channels,
+            kernel_size=conv1.kernel_size,
+            stride=conv1.stride,
+            padding=conv1.padding,
             bias=False,
         )
         with torch.no_grad():
-            new_conv.weight.copy_(conv0.weight.mean(dim=1, keepdim=True))
-        backbone.features.conv0 = new_conv
+            new_conv.weight.copy_(conv1.weight.mean(dim=1, keepdim=True))
+        backbone.conv1 = new_conv
 
-        num_features = backbone.classifier.in_features
-        backbone.classifier = nn.Linear(num_features, 1)
+        num_features = backbone.fc.in_features
+        backbone.fc = nn.Linear(num_features, 1)
         self.model = backbone
 
+        # Head-only fine-tuning: freeze all but the final fully-connected layer.
         for param in self.model.parameters():
             param.requires_grad = False
-        for module in [
-            self.model.features.denseblock4,
-            self.model.features.norm5,
-            self.model.classifier,
-        ]:
-            for param in module.parameters():
-                param.requires_grad = True
+        for param in self.model.fc.parameters():
+            param.requires_grad = True
 
     def _prepare_input(self, x: torch.Tensor) -> torch.Tensor:
         x = x.float()
