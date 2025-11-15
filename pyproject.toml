@@ -47,9 +47,9 @@ clientapp = "berlin25_xray.client_app:app"
 image-size = 128        # Smaller resolution cuts ViT token count for faster epochs
 batch-size = 1024       # Larger batches reduce optimizer steps without extra memory cost
 num-server-rounds = 3   # 3 x 5 = 15 effective local epochs (still <20min on MI300X)
-local-epochs = 5        # Per-round local epochs
+local-epochs = 4        # Per-round local epochs
 lr = 0.001              # Head LR; backbone scaled by VIT_BACKBONE_LR_SCALE
-compile-model = true    # Enable torch.compile for fused ViT execution
+compile-model = false    # Enable torch.compile for fused ViT execution
 
 # Default federation to use when running the app
 [tool.flwr.federations]

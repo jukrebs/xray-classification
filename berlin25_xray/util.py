@@ -7,6 +7,7 @@ to log additional metrics or save models based on different criteria.
 import logging
 import math
 import os
+import re
 import warnings
 from collections.abc import Mapping
 
@@ -24,6 +25,14 @@ from berlin25_xray.task import (
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="google.protobuf")
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_artifact_name(name: str) -> str:
+    """Return a W&B-safe artifact name (alnum, dash, underscore, dot)."""
+
+    if not isinstance(name, str):
+        name = str(name)
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", name)
 
 
 def _iter_metric_replies(replies, stage: str):
@@ -219,7 +228,8 @@ def save_best_model(arrays, agg_metrics, server_round, run_name, best_auroc_trac
         torch.save(arrays.to_torch_state_dict(), state_dict_file)
 
         metadata = {**agg_metrics, "round": server_round}
-        artifact_name = f"{run_name}_round{server_round}_auroc{auroc_str}"
+        safe_run_name = _sanitize_artifact_name(run_name or "run")
+        artifact_name = f"{safe_run_name}_round{server_round}_auroc{auroc_str}"
         artifact = wandb.Artifact(artifact_name, type="model", metadata=metadata)
         artifact.add_file(state_dict_file)
         wandb.log_artifact(artifact)
