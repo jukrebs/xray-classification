@@ -11,7 +11,7 @@ from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
-from transformers import AutoImageProcessor, AutoModel
+from transformers import AutoModel
 
 PARTITION_HOSPITAL_MAP = {
     0: "A",
@@ -35,9 +35,6 @@ class Net(nn.Module):
         if trust_remote_code is None:
             env_flag = os.environ.get("XRAY_TRUST_REMOTE_CODE", "true").lower()
             trust_remote_code = env_flag in {"1", "true", "yes"}
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model_name, trust_remote_code=trust_remote_code
-        )
         self.encoder = AutoModel.from_pretrained(
             self.model_name,
             trust_remote_code=trust_remote_code,
@@ -49,7 +46,7 @@ class Net(nn.Module):
         if hidden_size is None:
             raise ValueError(
                 "Unable to determine hidden size for DenseNet encoder configuration."
-            )
+        )
 
         head_hidden = max(512, hidden_size // 2)
         self.classifier = nn.Sequential(
@@ -61,25 +58,9 @@ class Net(nn.Module):
             nn.Linear(head_hidden, 1),
         )
 
-        size_cfg = self.image_processor.size
-        if isinstance(size_cfg, dict):
-            height = size_cfg.get("height") or size_cfg.get("shortest_edge") or 224
-            width = size_cfg.get("width") or size_cfg.get("shortest_edge") or height
-        elif isinstance(size_cfg, (list, tuple)):
-            height, width = size_cfg
-        else:
-            height = width = int(size_cfg)
-        self.target_size = (int(height), int(width))
-
-        mean = torch.tensor(
-            self.image_processor.image_mean, dtype=torch.float32
-        ).view(1, -1, 1, 1)
-        std = torch.tensor(
-            self.image_processor.image_std, dtype=torch.float32
-        ).view(1, -1, 1, 1)
-        if mean.shape[1] == 1:
-            mean = mean.repeat(1, 3, 1, 1)
-            std = std.repeat(1, 3, 1, 1)
+        self.target_size = int(os.environ.get("XRAY_DENSENET_SIZE", 224))
+        mean = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
+        std = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
         self.register_buffer("processor_mean", mean)
         self.register_buffer("processor_std", std)
 
@@ -89,12 +70,12 @@ class Net(nn.Module):
         if (x_detached.min() < 0) or (x_detached.max() > 1):
             x = x * 0.5 + 0.5
         x = torch.clamp(x, 0.0, 1.0)
-        if x.shape[1] == 1:
+        if x.shape[1] != 3:
             x = x.repeat(1, 3, 1, 1)
-        if tuple(x.shape[-2:]) != self.target_size:
+        if tuple(x.shape[-2:]) != (self.target_size, self.target_size):
             x = F.interpolate(
                 x,
-                size=self.target_size,
+                size=(self.target_size, self.target_size),
                 mode="bicubic",
                 align_corners=False,
             )
