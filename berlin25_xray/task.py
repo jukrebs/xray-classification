@@ -32,7 +32,7 @@ DEFAULT_BATCH_SIZE = 16
 DEFAULT_EVAL_BATCH_SIZE = 32
 
 # ViT tuning hyperparameters
-VIT_TUNE_LAST_N_LAYERS = 4
+VIT_TUNE_LAST_N_LAYERS = 0
 VIT_BACKBONE_LR_SCALE = 0.1  # backbone LR = head LR * scale
 
 PARTITION_HOSPITAL_MAP = {
@@ -604,7 +604,7 @@ def train(net, trainloader, epochs, lr, device):
     return avg_loss
 
 
-def test(net, testloader, device, use_tta: bool = True):
+def test(net, testloader, device, use_tta: bool = False):
     """Evaluate the model on the test set (binary classification).
 
     Returns:
@@ -645,6 +645,9 @@ def test(net, testloader, device, use_tta: bool = True):
             except TypeError:
                 autocast_ctx = amp.autocast(enabled=use_amp)
 
+        # Global temperature for eval-time calibration (does not affect training)
+        temperature = 1.5
+
         for batch in testloader:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
@@ -653,15 +656,17 @@ def test(net, testloader, device, use_tta: bool = True):
                 loss = criterion(outputs, y)
             total_loss += loss.item()
 
-            # Get predictions and probabilities
-            probs = torch.sigmoid(outputs)
+            # Temperature-scaled probabilities for AUROC-oriented evaluation
+            logits = outputs / temperature
+            probs = torch.sigmoid(logits)
 
             if use_tta:
                 # Simple test-time augmentation: horizontal flip (averaged prediction)
                 x_flip = torch.flip(x, dims=[3])
                 with autocast_ctx:
                     outputs_flip = net(x_flip)
-                probs_flip = torch.sigmoid(outputs_flip)
+                logits_flip = outputs_flip / temperature
+                probs_flip = torch.sigmoid(logits_flip)
                 probs = 0.5 * (probs + probs_flip)
 
             predictions = (probs > 0.5).float()
