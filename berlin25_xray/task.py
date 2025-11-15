@@ -32,7 +32,7 @@ DEFAULT_BATCH_SIZE = 16
 DEFAULT_EVAL_BATCH_SIZE = 32
 
 # ViT tuning hyperparameters
-VIT_TUNE_LAST_N_LAYERS = 4
+VIT_TUNE_LAST_N_LAYERS = 0
 VIT_BACKBONE_LR_SCALE = 0.1  # backbone LR = head LR * scale
 
 PARTITION_HOSPITAL_MAP = {
@@ -477,6 +477,10 @@ def train(net, trainloader, epochs, lr, device):
                 }
             )
         optimizer = torch.optim.AdamW(param_groups)
+
+        # Exponential moving average (EMA) of head parameters for more stable evaluation
+        ema_decay = 0.99
+        ema_head_params = [p.detach().clone() for p in head_params]
     else:
         params = (p for p in net.parameters() if p.requires_grad)
         optimizer = torch.optim.AdamW(
@@ -579,6 +583,10 @@ def train(net, trainloader, epochs, lr, device):
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            if isinstance(net, Net):
+                with torch.no_grad():
+                    for ema_p, p in zip(ema_head_params, head_params):
+                        ema_p.mul_(ema_decay).add_(p, alpha=1.0 - ema_decay)
             if scheduler is not None:
                 scheduler.step()
             running_loss += loss.item()
@@ -593,6 +601,13 @@ def train(net, trainloader, epochs, lr, device):
             avg_epoch_loss,
         )
         log_gpu_utilization(logger, device, prefix=f"Train/epoch{epoch + 1}")
+
+    # Swap in EMA head weights for downstream evaluation/aggregation
+    if isinstance(net, Net):
+        with torch.no_grad():
+            for p, ema_p in zip(head_params, ema_head_params):
+                p.data.copy_(ema_p.data)
+
     total_duration = time.perf_counter() - train_start
     avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
     logger.info(
@@ -604,7 +619,7 @@ def train(net, trainloader, epochs, lr, device):
     return avg_loss
 
 
-def test(net, testloader, device, use_tta: bool = True):
+def test(net, testloader, device, use_tta: bool = False):
     """Evaluate the model on the test set (binary classification).
 
     Returns:
