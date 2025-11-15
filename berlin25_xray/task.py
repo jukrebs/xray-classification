@@ -50,11 +50,14 @@ class Net(nn.Module):
 
         for param in self.model.parameters():
             param.requires_grad = False
-        for module in [
+        modules_to_unfreeze = [
+            self.model.features.denseblock3,
+            self.model.features.transition3,
             self.model.features.denseblock4,
             self.model.features.norm5,
             self.model.classifier,
-        ]:
+        ]
+        for module in modules_to_unfreeze:
             for param in module.parameters():
                 param.requires_grad = True
 
@@ -138,6 +141,15 @@ def train(net, trainloader, epochs, lr, device):
     optimizer = torch.optim.AdamW(
         (p for p in net.parameters() if p.requires_grad), lr=lr, weight_decay=0.01
     )
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr,
+        epochs=epochs,
+        steps_per_epoch=len(trainloader),
+        pct_start=0.1,
+        div_factor=10.0,
+        final_div_factor=100.0,
+    )
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
@@ -149,6 +161,7 @@ def train(net, trainloader, epochs, lr, device):
             loss = criterion(outputs, y)
             loss.backward()
             optimizer.step()
+            scheduler.step()
             running_loss += loss.item()
     avg_loss = running_loss / (len(trainloader) * epochs)
     return avg_loss
