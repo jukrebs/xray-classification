@@ -315,18 +315,17 @@ def load_data(
                     replacement=True,
                 )
                 shuffle = False  # sampler and shuffle cannot be used together
+        # Use single-process dataloading to avoid exhausting shared system
+        # resources (e.g., OS semaphores) on constrained clusters.
         loader_kwargs = dict(
             dataset=data,
             batch_size=batch_size,
             shuffle=shuffle,
             sampler=sampler,
-            num_workers=4,
+            num_workers=0,
             pin_memory=torch.cuda.is_available(),
             collate_fn=collate_preprocessed,
         )
-        if loader_kwargs["num_workers"] > 0:
-            loader_kwargs["persistent_workers"] = True
-            loader_kwargs["prefetch_factor"] = 4
         dataloader = DataLoader(**loader_kwargs)
         num_batches = len(dataloader)
         logger.info(
