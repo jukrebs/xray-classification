@@ -46,6 +46,11 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 configure_logging()
 logger = logging.getLogger(__name__)
 
+# Cache for ViT weights/state_dicts to avoid repeated, expensive loads
+_VIT_WEIGHTS = ViT_B_16_Weights.IMAGENET1K_V1
+_VIT_BASE_STATE_DICT = None
+_VIT_RESIZED_STATE_DICT_CACHE = {}
+
 
 class Net(nn.Module):
     """ViT-B/16-based model for binary chest X-ray classification (pretrained)."""
@@ -53,17 +58,29 @@ class Net(nn.Module):
     def __init__(self, image_size: int = 224):
         super(Net, self).__init__()
 
-        weights = ViT_B_16_Weights.IMAGENET1K_V1
         self.image_size = image_size
 
-        # Load ImageNet-pretrained ViT-B/16 at the requested resolution
+        # Build the ViT backbone at the requested resolution
         self.vit = vit_b_16(weights=None, image_size=image_size)
-        state_dict = weights.get_state_dict(progress=False)
-        state_dict = _resize_vit_positional_embeddings(state_dict, self.vit, image_size)
-        # Drop the original classifier head weights so we can replace the head shape
-        state_dict.pop("heads.head.weight", None)
-        state_dict.pop("heads.head.bias", None)
-        missing, unexpected = self.vit.load_state_dict(state_dict, strict=False)
+
+        # Lazily load and cache the pretrained state_dict, then cache the
+        # resized positional embeddings per image_size. This avoids paying
+        # the cost of loading/resizing ViT weights on every Net() creation.
+        global _VIT_BASE_STATE_DICT, _VIT_RESIZED_STATE_DICT_CACHE
+        if _VIT_BASE_STATE_DICT is None:
+            _VIT_BASE_STATE_DICT = _VIT_WEIGHTS.get_state_dict(progress=False)
+
+        cache_key = int(image_size)
+        cached_state = _VIT_RESIZED_STATE_DICT_CACHE.get(cache_key)
+        if cached_state is None:
+            state_dict = dict(_VIT_BASE_STATE_DICT)
+            state_dict = _resize_vit_positional_embeddings(state_dict, self.vit, image_size)
+            state_dict.pop("heads.head.weight", None)
+            state_dict.pop("heads.head.bias", None)
+            _VIT_RESIZED_STATE_DICT_CACHE[cache_key] = state_dict
+            cached_state = state_dict
+
+        missing, unexpected = self.vit.load_state_dict(cached_state, strict=False)
         if unexpected:
             logger.debug("Unexpected ViT weights skipped: %s", unexpected)
         if missing:
@@ -102,9 +119,9 @@ class Net(nn.Module):
                 for p in layer_container[idx].parameters():
                     p.requires_grad = True
 
-        # Store ImageNet normalization stats so inputs match the pretrained backbone
-        # Fallback to standard ImageNet stats if torchvision doesn't expose them via weights.meta
-        meta = getattr(weights, "meta", {}) or {}
+        # Store ImageNet normalization stats so inputs match the pretrained backbone.
+        # Fallback to standard ImageNet stats if torchvision doesn't expose them via weights.meta.
+        meta = getattr(_VIT_WEIGHTS, "meta", {}) or {}
         mean_vals = meta.get("mean", (0.485, 0.456, 0.406))
         std_vals = meta.get("std", (0.229, 0.224, 0.225))
         mean = torch.tensor(mean_vals).view(1, 3, 1, 1)
@@ -587,7 +604,7 @@ def train(net, trainloader, epochs, lr, device):
     return avg_loss
 
 
-def test(net, testloader, device):
+def test(net, testloader, device, use_tta: bool = True):
     """Evaluate the model on the test set (binary classification).
 
     Returns:
@@ -639,13 +656,14 @@ def test(net, testloader, device):
             # Get predictions and probabilities
             probs = torch.sigmoid(outputs)
 
-            # Simple test-time augmentation: horizontal flip
-            x_flip = torch.flip(x, dims=[3])
-            with autocast_ctx:
-                outputs_flip = net(x_flip)
-            probs_flip = torch.sigmoid(outputs_flip)
+            if use_tta:
+                # Simple test-time augmentation: horizontal flip (averaged prediction)
+                x_flip = torch.flip(x, dims=[3])
+                with autocast_ctx:
+                    outputs_flip = net(x_flip)
+                probs_flip = torch.sigmoid(outputs_flip)
+                probs = 0.5 * (probs + probs_flip)
 
-            probs = 0.5 * (probs + probs_flip)
             predictions = (probs > 0.5).float()
 
             # Store for metric calculation
