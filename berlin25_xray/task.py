@@ -160,9 +160,26 @@ class LabelSmoothingBCELoss(nn.Module):
         return self.bce(inputs, targets_smoothed)
 
 
+class FocalLoss(nn.Module):
+    """Standard focal loss on top of BCEWithLogits for class imbalance."""
+
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        bce = self.bce(inputs, targets)
+        probs = torch.sigmoid(inputs)
+        pt = probs * targets + (1.0 - probs) * (1.0 - targets)
+        focal_weight = self.alpha * (1.0 - pt).pow(self.gamma)
+        return (focal_weight * bce).mean()
+
+
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    criterion = LabelSmoothingBCELoss(smoothing=0.05).to(device)
+    criterion = FocalLoss(alpha=0.25, gamma=2.0).to(device)
     optimizer = torch.optim.AdamW(
         (p for p in net.parameters() if p.requires_grad), lr=lr, weight_decay=0.01
     )
