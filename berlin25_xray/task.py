@@ -1,10 +1,12 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
 import os
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from torchvision import models
@@ -21,26 +23,60 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 
 class Net(nn.Module):
-    """Starting point: ResNet18-based model for binary chest X-ray classification."""
+    """DenseNet-121 baseline with ImageNet initialization and partial fine-tuning."""
 
-    def __init__(self):
-        super(Net, self).__init__()
-        self.model = models.resnet18(weights=None)
-        # Adapt to grayscale input
-        self.model.conv1 = nn.Conv2d(
-            in_channels=1,
-            out_channels=64,
-            kernel_size=7,
-            stride=2,
-            padding=3,
+    def __init__(self, image_size: int = 224):
+        super().__init__()
+        self.target_size = image_size
+        weights = models.DenseNet121_Weights.IMAGENET1K_V1
+        backbone = models.densenet121(weights=weights)
+
+        conv0 = backbone.features.conv0
+        new_conv = nn.Conv2d(
+            1,
+            conv0.out_channels,
+            kernel_size=conv0.kernel_size,
+            stride=conv0.stride,
+            padding=conv0.padding,
             bias=False,
         )
-        # Binary classification head (single logit)
-        in_features = self.model.fc.in_features
-        self.model.fc = nn.Linear(in_features, 1)
+        with torch.no_grad():
+            new_conv.weight.copy_(conv0.weight.mean(dim=1, keepdim=True))
+        backbone.features.conv0 = new_conv
 
-    def forward(self, x):
-        return self.model(x)  # No sigmoid, using BCEWithLogitsLoss
+        num_features = backbone.classifier.in_features
+        backbone.classifier = nn.Linear(num_features, 1)
+        self.model = backbone
+
+        for param in self.model.parameters():
+            param.requires_grad = False
+        modules_to_unfreeze = [
+            self.model.features.denseblock3,
+            self.model.features.transition3,
+            self.model.features.denseblock4,
+            self.model.features.norm5,
+            self.model.classifier,
+        ]
+        for module in modules_to_unfreeze:
+            for param in module.parameters():
+                param.requires_grad = True
+
+    def _prepare_input(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.float()
+        if x.min() < 0 or x.max() > 1:
+            x = x * 0.5 + 0.5
+        if tuple(x.shape[-2:]) != (self.target_size, self.target_size):
+            x = F.interpolate(
+                x,
+                size=(self.target_size, self.target_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+        return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self._prepare_input(x)
+        return self.model(x)
 
 
 def collate_preprocessed(batch):
@@ -49,7 +85,9 @@ def collate_preprocessed(batch):
     for key in batch[0].keys():
         if key in ["x", "y"]:
             # Convert lists back to tensors and stack
-            result[key] = torch.stack([torch.tensor(item[key]) for item in batch])
+            result[key] = torch.stack(
+                [torch.tensor(item[key], dtype=torch.float32) for item in batch]
+            )
         else:
             # Keep other fields as lists
             result[key] = [item[key] for item in batch]
@@ -59,8 +97,8 @@ def collate_preprocessed(batch):
 def load_data(
     dataset_name: str,
     split_name: str,
-    image_size: int = 128,
-    batch_size: int = 16,
+    image_size: int = 224,
+    batch_size: int = 128,
 ):
     """Load hospital X-ray data.
 
@@ -100,18 +138,30 @@ def load_data(
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(
+        (p for p in net.parameters() if p.requires_grad), lr=lr, weight_decay=0.01
+    )
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr,
+        epochs=epochs,
+        steps_per_epoch=len(trainloader),
+        pct_start=0.1,
+        div_factor=10.0,
+        final_div_factor=100.0,
+    )
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
         for batch in tqdm(trainloader):
-            x = batch["x"].to(device)
-            y = batch["y"].to(device)
+            x = batch["x"].to(device, non_blocking=True).float()
+            y = batch["y"].to(device, non_blocking=True).float()
             optimizer.zero_grad()
             outputs = net(x)
             loss = criterion(outputs, y)
             loss.backward()
             optimizer.step()
+            scheduler.step()
             running_loss += loss.item()
     avg_loss = running_loss / (len(trainloader) * epochs)
     return avg_loss
@@ -139,8 +189,8 @@ def test(net, testloader, device):
     all_labels = []
     with torch.no_grad():
         for batch in testloader:
-            x = batch["x"].to(device)
-            y = batch["y"].to(device)
+            x = batch["x"].to(device, non_blocking=True).float()
+            y = batch["y"].to(device, non_blocking=True).float()
             outputs = net(x)
             loss = criterion(outputs, y)
             total_loss += loss.item()
