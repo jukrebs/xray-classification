@@ -32,7 +32,7 @@ DEFAULT_BATCH_SIZE = 16
 DEFAULT_EVAL_BATCH_SIZE = 32
 
 # ViT tuning hyperparameters
-VIT_TUNE_LAST_N_LAYERS = 4
+VIT_TUNE_LAST_N_LAYERS = 0
 VIT_BACKBONE_LR_SCALE = 0.1  # backbone LR = head LR * scale
 
 PARTITION_HOSPITAL_MAP = {
@@ -50,6 +50,32 @@ logger = logging.getLogger(__name__)
 _VIT_WEIGHTS = ViT_B_16_Weights.IMAGENET1K_V1
 _VIT_BASE_STATE_DICT = None
 _VIT_RESIZED_STATE_DICT_CACHE = {}
+
+
+class DualHead(nn.Module):
+    """Two independent MLP heads with averaged logits for cheap ensembling."""
+
+    def __init__(self, in_features: int):
+        super().__init__()
+        self.head1 = nn.Sequential(
+            nn.LayerNorm(in_features),
+            nn.Linear(in_features, 512),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, 1),
+        )
+        self.head2 = nn.Sequential(
+            nn.LayerNorm(in_features),
+            nn.Linear(in_features, 512),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logit1 = self.head1(x)
+        logit2 = self.head2(x)
+        return 0.5 * (logit1 + logit2)
 
 
 class Net(nn.Module):
@@ -87,13 +113,7 @@ class Net(nn.Module):
             logger.debug("Missing ViT weights (expected due to head swap): %s", missing)
 
         in_features = self.vit.heads.head.in_features
-        self.vit.heads.head = nn.Sequential(
-            nn.LayerNorm(in_features),
-            nn.Linear(in_features, 512),
-            nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(512, 1),
-        )
+        self.vit.heads.head = DualHead(in_features)
 
         # Freeze all parameters by default.
         for param in self.vit.parameters():
@@ -604,7 +624,7 @@ def train(net, trainloader, epochs, lr, device):
     return avg_loss
 
 
-def test(net, testloader, device, use_tta: bool = True):
+def test(net, testloader, device, use_tta: bool = False):
     """Evaluate the model on the test set (binary classification).
 
     Returns:
