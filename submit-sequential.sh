@@ -1,20 +1,23 @@
 #!/bin/bash
 # submit-sequential.sh - Submit chained FL training jobs that resume from checkpoints
-# Usage: ./submit-sequential.sh <num_jobs> [--gpu] [--rounds-per-job N]
+# Usage: ./submit-sequential.sh <num_jobs> [--gpu] [--rounds-per-job N] [--dependency-type TYPE]
 # Example: ./submit-sequential.sh 10 --gpu --rounds-per-job 5
+# Dependency types: afterok (default), afterany (continue even if job fails), singleton (one at a time)
 
 set -e
 
-[ $# -lt 1 ] && { echo "Usage: $0 <num_jobs> [--gpu] [--rounds-per-job N]"; exit 1; }
+[ $# -lt 1 ] && { echo "Usage: $0 <num_jobs> [--gpu] [--rounds-per-job N] [--dependency-type TYPE]"; exit 1; }
 
 NUM_JOBS=$1; shift
 ROUNDS_PER_JOB=5
 GPU_FLAG=""
+DEPENDENCY_TYPE="afterany"  # Changed default to afterany (more forgiving)
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --gpu) GPU_FLAG="--gpu"; shift ;;
     --rounds-per-job) ROUNDS_PER_JOB="$2"; shift 2 ;;
+    --dependency-type) DEPENDENCY_TYPE="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -23,6 +26,7 @@ TOTAL_ROUNDS=$((NUM_JOBS * ROUNDS_PER_JOB))
 echo "=== Submitting ${NUM_JOBS} chained jobs ==="
 echo "Rounds per job: ${ROUNDS_PER_JOB}"
 echo "Total rounds: ${TOTAL_ROUNDS}"
+echo "Dependency type: ${DEPENDENCY_TYPE}"
 echo ""
 
 # Submit first job
@@ -34,8 +38,11 @@ PREV_JOB=$FIRST_JOB
 for ((i=2; i<=NUM_JOBS; i++)); do
     JOB_SUFFIX=$(printf "fl_round_%03d" $i)
     
-    # Submit job that depends on previous job's success
-    NEXT_JOB=$(sbatch --parsable --dependency=afterok:${PREV_JOB} <<EOF | tail -1
+    # Submit job that depends on previous job
+    # afterany: run regardless of previous job exit status (recommended for checkpoint recovery)
+    # afterok: only run if previous job succeeded (stricter)
+    # singleton: only one job with this name runs at a time
+    NEXT_JOB=$(sbatch --parsable --dependency=${DEPENDENCY_TYPE}:${PREV_JOB} <<EOF | tail -1
 #!/bin/bash
 #SBATCH --output /home/\${USER}/logs/job%j_${JOB_SUFFIX}.out
 #SBATCH --job-name ${JOB_SUFFIX}
