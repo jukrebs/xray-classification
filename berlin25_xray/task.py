@@ -50,10 +50,14 @@ class Net(nn.Module):
                 "Unable to determine hidden size for CXformer encoder configuration."
             )
 
+        head_hidden = max(512, hidden_size // 2)
         self.classifier = nn.Sequential(
             nn.LayerNorm(hidden_size),
             nn.Dropout(p=0.1),
-            nn.Linear(hidden_size, 1),
+            nn.Linear(hidden_size, head_hidden),
+            nn.GELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(head_hidden, 1),
         )
 
         size_cfg = self.image_processor.size
