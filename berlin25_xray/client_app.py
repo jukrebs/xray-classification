@@ -4,7 +4,12 @@ import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
-from berlin25_xray.task import PARTITION_HOSPITAL_MAP, Net, load_data
+from berlin25_xray.task import (
+    PARTITION_HOSPITAL_MAP,
+    Net,
+    get_pos_weight,
+    load_data,
+)
 from berlin25_xray.task import test as test_fn
 from berlin25_xray.task import train as train_fn
 from berlin25_xray.fedbn import get_batchnorm_keys, split_state_dict_by_bn
@@ -49,6 +54,7 @@ def train(msg: Message, context: Context):
     dataset_name = f"Hospital{PARTITION_HOSPITAL_MAP[partition_id]}"
     image_size = context.run_config["image-size"]
     trainloader = load_data(dataset_name, "train", image_size=image_size)
+    pos_weight = get_pos_weight(dataset_name, "train", image_size=image_size)
 
     # Call the training function
     train_loss = train_fn(
@@ -57,6 +63,7 @@ def train(msg: Message, context: Context):
         context.run_config["local-epochs"],
         msg.content["config"]["lr"],
         device,
+        pos_weight=pos_weight,
     )
 
     # Construct and return reply Message

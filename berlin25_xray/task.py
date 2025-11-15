@@ -21,6 +21,10 @@ PARTITION_HOSPITAL_MAP = {
 }
 
 hospital_datasets = {}  # Cache loaded hospital datasets
+# Track per-split class balance to build better loss weights.
+hospital_class_stats = {}
+# Ray allocates limited CPU cores per client; cap DataLoader workers accordingly.
+DATALOADER_MAX_WORKERS = int(os.environ.get("DATALOADER_MAX_WORKERS", "6"))
 
 try:  # Ensure dataloader workers use spawn to avoid shared memory issues
     mp.set_start_method("spawn", force=True)
@@ -85,6 +89,29 @@ class Net(nn.Module):
         return self.model(x)
 
 
+def _cache_class_balance(cache_key: str, dataset):
+    """Store positive/negative counts for a dataset split."""
+    if cache_key in hospital_class_stats:
+        return
+    labels = dataset["y"]
+    labels_np = np.array(labels, dtype=np.float32).reshape(-1)
+    positives = float(labels_np.sum())
+    negatives = float(len(labels_np) - positives)
+    hospital_class_stats[cache_key] = (positives, negatives)
+
+
+def get_pos_weight(dataset_name: str, split_name: str, image_size: int = 224):
+    """Return negative-to-positive ratio for weighting BCE loss."""
+    cache_key = f"{dataset_name}_{split_name}_{image_size}"
+    stats = hospital_class_stats.get(cache_key)
+    if not stats:
+        return None
+    positives, negatives = stats
+    if positives <= 0.0:
+        return None
+    return negatives / positives
+
+
 def load_data(
     dataset_name: str,
     split_name: str,
@@ -111,14 +138,21 @@ def load_data(
     global hospital_datasets
     if cache_key not in hospital_datasets:
         full_dataset = load_from_disk(dataset_path)
-        for split in full_dataset.keys():
-            full_dataset[split].set_format(type="torch", columns=["x", "y"])
-        hospital_datasets[cache_key] = full_dataset[split_name]
-        print(f"Loaded {dataset_path}/{split_name}")
+        for split, split_data in full_dataset.items():
+            split_cache_key = f"{dataset_name}_{split}_{image_size}"
+            if split_cache_key in hospital_datasets:
+                continue
+            _cache_class_balance(split_cache_key, split_data)
+            split_data.set_format(type="torch", columns=["x", "y"])
+            hospital_datasets[split_cache_key] = split_data
+            print(f"Loaded {dataset_path}/{split}")
 
     data = hospital_datasets[cache_key]
     shuffle = split_name == "train"  # shuffle only for training splits
-    num_workers = min(8, os.cpu_count() or 1)
+    cpu_budget = os.cpu_count() or 1
+    dataset_len = len(data)
+    inferred_max_workers = min(8, cpu_budget, dataset_len)
+    num_workers = min(DATALOADER_MAX_WORKERS, inferred_max_workers)
     dataloader_kwargs = dict(
         dataset=data,
         batch_size=batch_size,
@@ -133,9 +167,12 @@ def load_data(
     return dataloader
 
 
-def train(net, trainloader, epochs, lr, device):
+def train(net, trainloader, epochs, lr, device, pos_weight: Optional[float] = None):
     net.to(device)
-    criterion = torch.nn.BCEWithLogitsLoss().to(device)
+    weight_tensor = None
+    if pos_weight is not None:
+        weight_tensor = torch.tensor([pos_weight], device=device)
+    criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weight_tensor).to(device)
     optimizer = torch.optim.AdamW(
         (p for p in net.parameters() if p.requires_grad), lr=lr, weight_decay=0.01
     )
