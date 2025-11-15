@@ -371,8 +371,11 @@ def train(net, trainloader, epochs, lr, device):
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
     if isinstance(net, Net):
         head_params = list(net.vit.heads.head.parameters())
+        head_param_ids = {id(p) for p in head_params}
         backbone_params = [
-            p for p in net.parameters() if p.requires_grad and p not in head_params
+            p
+            for p in net.parameters()
+            if p.requires_grad and id(p) not in head_param_ids
         ]
         param_groups = []
         if head_params:

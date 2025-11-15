@@ -203,6 +203,13 @@ def save_best_model(arrays, agg_metrics, server_round, run_name, best_auroc_trac
 
     Returns updated best_auroc_tracker dict with 'auroc' key.
     """
+    if arrays is None:
+        logger.warning(
+            "Skipping model save for round %s because model arrays are unavailable.",
+            server_round,
+        )
+        return False, "  Model not saved (model arrays unavailable)"
+
     raw_auroc = agg_metrics["roc_auc"]
     try:
         current_auroc = float(raw_auroc)
