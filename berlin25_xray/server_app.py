@@ -1,4 +1,5 @@
 import os
+import subprocess
 from logging import INFO
 
 import wandb
@@ -24,8 +25,17 @@ def main(grid: Grid, context: Context) -> None:
     lr: float = context.run_config["lr"]
     local_epochs: int = context.run_config["local-epochs"]
 
-    # Get run name from environment variable (set by submit_job.sh). Feel free to change this.
-    run_name = os.environ.get("JOB_NAME", "your_custom_run_name")
+    def git_cmd(args):
+        return subprocess.check_output(["git"] + args).decode("utf-8").strip()
+
+    try:
+        branch = git_cmd(["rev-parse", "--abbrev-ref", "HEAD"])
+        commit = git_cmd(["rev-parse", "--short", "HEAD"])
+    except Exception:
+        branch, commit = "unknown", "unknown"
+
+    env_run_name = os.environ.get("JOB_NAME")
+    run_name = env_run_name or f"{branch}-{commit}"
 
     # W&B auth and project/entity are configured via environment variables
     wandb.login()
@@ -33,11 +43,15 @@ def main(grid: Grid, context: Context) -> None:
     wandb.init(
         project="hackathon",
         entity="justus-krebs-technische-universit-t-berlin",
+        name=run_name,
         config={
             "num_rounds": num_rounds,
             "learning_rate": lr,
             "local_epochs": local_epochs,
+            "git_branch": branch,
+            "git_commit": commit,
         },
+        tags=[branch, commit],
     )
     log(INFO, "Wandb initialized with run_id: %s", wandb.run.id)
 
