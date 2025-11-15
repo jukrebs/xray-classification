@@ -23,17 +23,40 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 
 class Net(nn.Module):
-    """DenseNet-121 baseline for binary chest X-ray classification."""
+    """DenseNet-121 baseline with ImageNet initialization and partial fine-tuning."""
 
     def __init__(self, image_size: int = 224):
         super().__init__()
         self.target_size = image_size
-        self.model = models.densenet121(weights=None)
-        self.model.features.conv0 = nn.Conv2d(
-            1, 64, kernel_size=7, stride=2, padding=3, bias=False
+        weights = models.DenseNet121_Weights.IMAGENET1K_V1
+        backbone = models.densenet121(weights=weights)
+
+        conv0 = backbone.features.conv0
+        new_conv = nn.Conv2d(
+            1,
+            conv0.out_channels,
+            kernel_size=conv0.kernel_size,
+            stride=conv0.stride,
+            padding=conv0.padding,
+            bias=False,
         )
-        num_features = self.model.classifier.in_features
-        self.model.classifier = nn.Linear(num_features, 1)
+        with torch.no_grad():
+            new_conv.weight.copy_(conv0.weight.mean(dim=1, keepdim=True))
+        backbone.features.conv0 = new_conv
+
+        num_features = backbone.classifier.in_features
+        backbone.classifier = nn.Linear(num_features, 1)
+        self.model = backbone
+
+        for param in self.model.parameters():
+            param.requires_grad = False
+        for module in [
+            self.model.features.denseblock4,
+            self.model.features.norm5,
+            self.model.classifier,
+        ]:
+            for param in module.parameters():
+                param.requires_grad = True
 
     def _prepare_input(self, x: torch.Tensor) -> torch.Tensor:
         x = x.float()
@@ -112,7 +135,9 @@ def load_data(
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(
+        (p for p in net.parameters() if p.requires_grad), lr=lr, weight_decay=0.01
+    )
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
