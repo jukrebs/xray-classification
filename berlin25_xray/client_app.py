@@ -1,3 +1,5 @@
+from collections import OrderedDict
+
 import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
@@ -5,8 +7,27 @@ from flwr.clientapp import ClientApp
 from berlin25_xray.task import PARTITION_HOSPITAL_MAP, Net, load_data
 from berlin25_xray.task import test as test_fn
 from berlin25_xray.task import train as train_fn
+from berlin25_xray.fedbn import get_batchnorm_keys, split_state_dict_by_bn
 
 app = ClientApp()
+LOCAL_BN_STATE: dict[int, OrderedDict[str, torch.Tensor]] = {}
+
+
+def _restore_local_bn_state(model: Net, partition_id: int) -> set[str]:
+    """Load cached BN statistics into the model if we have them."""
+    bn_keys = get_batchnorm_keys(model)
+    bn_state = LOCAL_BN_STATE.get(partition_id)
+    if bn_state:
+        model.load_state_dict(bn_state, strict=False)
+    return bn_keys
+
+
+def _cache_local_bn_state(model: Net, partition_id: int, bn_keys: set[str]) -> None:
+    """Persist BN parameters/buffers per-partition so they stay local across rounds."""
+    _, bn_state = split_state_dict_by_bn(model.state_dict(), bn_keys)
+    LOCAL_BN_STATE[partition_id] = OrderedDict(
+        (k, v.detach().cpu().clone()) for k, v in bn_state.items()
+    )
 
 
 @app.train()
@@ -15,13 +36,16 @@ def train(msg: Message, context: Context):
 
     # Load the model and initialize it with the received weights
     model = Net()
-    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+    partition_id = context.node_config["partition-id"]
+    bn_keys = _restore_local_bn_state(model, partition_id)
+    state_dict = msg.content["arrays"].to_torch_state_dict()
+    state_dict_wo_bn, _ = split_state_dict_by_bn(state_dict, bn_keys)
+    model.load_state_dict(state_dict_wo_bn, strict=False)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
     model.to(device)
 
     # Load the data
-    partition_id = context.node_config["partition-id"]
     dataset_name = f"Hospital{PARTITION_HOSPITAL_MAP[partition_id]}"
     image_size = context.run_config["image-size"]
     trainloader = load_data(dataset_name, "train", image_size=image_size)
@@ -36,7 +60,9 @@ def train(msg: Message, context: Context):
     )
 
     # Construct and return reply Message
-    model_record = ArrayRecord(model.state_dict())
+    state_dict_wo_bn, _ = split_state_dict_by_bn(model.state_dict(), bn_keys)
+    _cache_local_bn_state(model, partition_id, bn_keys)
+    model_record = ArrayRecord(state_dict_wo_bn)
     metrics = {
         "partition-id": context.node_config["partition-id"],
         "train_loss": train_loss,
@@ -51,11 +77,14 @@ def train(msg: Message, context: Context):
 def evaluate(msg: Message, context: Context):
     """Evaluate the model on local data."""
     model = Net()
-    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+    partition_id = context.node_config["partition-id"]
+    bn_keys = _restore_local_bn_state(model, partition_id)
+    state_dict = msg.content["arrays"].to_torch_state_dict()
+    state_dict_wo_bn, _ = split_state_dict_by_bn(state_dict, bn_keys)
+    model.load_state_dict(state_dict_wo_bn, strict=False)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    partition_id = context.node_config["partition-id"]
     dataset_name = f"Hospital{PARTITION_HOSPITAL_MAP[partition_id]}"
     image_size = context.run_config["image-size"]
     valloader = load_data(dataset_name, "eval", image_size=image_size)

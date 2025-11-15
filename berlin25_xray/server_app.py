@@ -15,6 +15,7 @@ from berlin25_xray.util import (
     log_training_metrics,
     save_best_model,
 )
+from berlin25_xray.fedbn import get_batchnorm_keys, split_state_dict_by_bn
 
 app = ServerApp()
 
@@ -56,8 +57,10 @@ def main(grid: Grid, context: Context) -> None:
     log(INFO, "Wandb initialized with run_id: %s", wandb.run.id)
 
     global_model = Net()
-    arrays = ArrayRecord(global_model.state_dict())
-    strategy = HackathonFedAvg(fraction_train=1, run_name=run_name)
+    bn_keys = get_batchnorm_keys(global_model)
+    initial_state, _ = split_state_dict_by_bn(global_model.state_dict(), bn_keys)
+    arrays = ArrayRecord(initial_state)
+    strategy = HackathonFedBN(fraction_train=1, run_name=run_name)
 
     result = strategy.start(
         grid=grid,
@@ -71,8 +74,8 @@ def main(grid: Grid, context: Context) -> None:
     log(INFO, "Wandb run finished")
 
 
-class HackathonFedAvg(FedAvg):
-    """FedAvg strategy that logs metrics and saves best model to W&B."""
+class HackathonFedBN(FedAvg):
+    """FedBN strategy that logs metrics and saves best model to W&B."""
 
     def __init__(self, *args, run_name=None, **kwargs):
         super().__init__(*args, **kwargs)
