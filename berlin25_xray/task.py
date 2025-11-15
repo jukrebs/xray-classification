@@ -98,7 +98,7 @@ def load_data(
     dataset_name: str,
     split_name: str,
     image_size: int = 224,
-    batch_size: int = 64,
+    batch_size: int = 32,
 ):
     """Load hospital X-ray data.
 
