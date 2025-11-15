@@ -140,7 +140,8 @@ def load_data(
         data,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=4,
+        num_workers=0,  # Avoid shared-memory issues on constrained clusters
+        pin_memory=False,
         collate_fn=collate_preprocessed,
     )
     return dataloader
@@ -168,21 +169,25 @@ def train(net, trainloader, epochs, lr, device):
     )
     net.train()
     running_loss = 0.0
+    use_amp = device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     for _ in range(epochs):
         for batch in tqdm(trainloader):
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
             optimizer.zero_grad()
-            outputs = net(x)
-            loss = criterion(outputs, y)
-            loss.backward()
-            optimizer.step()
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                outputs = net(x)
+                loss = criterion(outputs, y)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss += loss.item()
     avg_loss = running_loss / (len(trainloader) * epochs)
     return avg_loss
 
 
-def test(net, testloader, device):
+def test(net, testloader, device, max_batches: Optional[int] = None):
     """Evaluate the model on the test set (binary classification).
 
     Returns:
@@ -202,12 +207,16 @@ def test(net, testloader, device):
     all_probs = []
     all_predictions = []
     all_labels = []
+    use_amp = device.type == "cuda"
     with torch.no_grad():
-        for batch in testloader:
+        for batch_idx, batch in enumerate(testloader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
-            outputs = net(x)
-            loss = criterion(outputs, y)
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                outputs = net(x)
+                loss = criterion(outputs, y)
             total_loss += loss.item()
 
             # Get predictions and probabilities

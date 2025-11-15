@@ -23,9 +23,13 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="google.pr
 
 def compute_metrics(reply_metrics):
     """Compute ROC-AUC and confusion matrix metrics."""
-    probs = np.array(reply_metrics["probs"])
-    labels = np.array(reply_metrics["labels"])
-    roc_auc = roc_auc_score(labels, probs)
+    # New fast path: client already computed AUROC and did not send per-example arrays
+    if "roc_auc" in reply_metrics and "probs" not in reply_metrics:
+        roc_auc = reply_metrics["roc_auc"]
+    else:
+        probs = np.array(reply_metrics["probs"])
+        labels = np.array(reply_metrics["labels"])
+        roc_auc = roc_auc_score(labels, probs)
     cm_metrics = compute_metrics_from_confusion_matrix(
         reply_metrics["tp"],
         reply_metrics["tn"],
@@ -37,14 +41,27 @@ def compute_metrics(reply_metrics):
 
 def compute_aggregated_metrics(replies):
     """Compute aggregated metrics across all hospitals."""
-    all_probs = [p for r in replies for p in r.content["metrics"]["probs"]]
-    all_labels = [l for r in replies for l in r.content["metrics"]["labels"]]
-    roc_auc = roc_auc_score(np.array(all_labels), np.array(all_probs))
+    metrics_list = [r.content["metrics"] for r in replies]
 
-    tp = sum(r.content["metrics"]["tp"] for r in replies)
-    tn = sum(r.content["metrics"]["tn"] for r in replies)
-    fp = sum(r.content["metrics"]["fp"] for r in replies)
-    fn = sum(r.content["metrics"]["fn"] for r in replies)
+    # If per-example arrays are available, keep exact micro-average behaviour.
+    if "probs" in metrics_list[0]:
+        all_probs = [p for m in metrics_list for p in m["probs"]]
+        all_labels = [l for m in metrics_list for l in m["labels"]]
+        roc_auc = roc_auc_score(np.array(all_labels), np.array(all_probs))
+    else:
+        # No arrays: approximate global AUROC as sample-count–weighted mean of client AUROCs.
+        total_n = sum(m.get("num-eval-examples", 0) for m in metrics_list)
+        if total_n > 0:
+            roc_auc = sum(
+                m["roc_auc"] * m.get("num-eval-examples", 0) for m in metrics_list
+            ) / total_n
+        else:
+            roc_auc = 0.0
+
+    tp = sum(m["tp"] for m in metrics_list)
+    tn = sum(m["tn"] for m in metrics_list)
+    fp = sum(m["fp"] for m in metrics_list)
+    fn = sum(m["fn"] for m in metrics_list)
     cm_metrics = compute_metrics_from_confusion_matrix(tp, tn, fp, fn)
 
     return {"roc_auc": roc_auc, **cm_metrics}

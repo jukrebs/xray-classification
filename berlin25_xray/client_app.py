@@ -1,6 +1,7 @@
 import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
+from sklearn.metrics import roc_auc_score
 
 from berlin25_xray.task import PARTITION_HOSPITAL_MAP, Net, load_data
 from berlin25_xray.task import test as test_fn
@@ -58,9 +59,17 @@ def evaluate(msg: Message, context: Context):
     partition_id = context.node_config["partition-id"]
     dataset_name = f"Hospital{PARTITION_HOSPITAL_MAP[partition_id]}"
     image_size = context.run_config["image-size"]
+    max_eval_batches = context.run_config.get("max-eval-batches", None)
     valloader = load_data(dataset_name, "eval", image_size=image_size)
 
-    eval_loss, tp, tn, fp, fn, probs, labels = test_fn(model, valloader, device)
+    eval_loss, tp, tn, fp, fn, probs, labels = test_fn(
+        model, valloader, device, max_batches=max_eval_batches
+    )
+
+    # Compute AUROC locally; send scalar instead of full arrays
+    roc_auc = (
+        roc_auc_score(labels, probs) if len(labels) > 0 else 0.0
+    )
 
     metric_record = MetricRecord(
         {
@@ -71,8 +80,8 @@ def evaluate(msg: Message, context: Context):
             "fp": fp,
             "fn": fn,
             "num-examples": len(valloader.dataset),
-            "probs": probs.tolist(),  # Convert numpy array to list for MetricRecord
-            "labels": labels.tolist(),  # Convert numpy array to list for MetricRecord
+            "num-eval-examples": len(labels),
+            "roc_auc": roc_auc,
         }
     )
     content = RecordDict({"metrics": metric_record})
