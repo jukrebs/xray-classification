@@ -1,5 +1,3 @@
-import os
-
 import torch
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
@@ -7,8 +5,6 @@ from flwr.clientapp import ClientApp
 from berlin25_xray.task import PARTITION_HOSPITAL_MAP, Net, load_data
 from berlin25_xray.task import test as test_fn
 from berlin25_xray.task import train as train_fn
-
-from ..fl_checkpoints import save_client_ckpt
 
 app = ClientApp()
 
@@ -31,7 +27,7 @@ def train(msg: Message, context: Context):
         dataset_name, "train", image_size=image_size, batch_size=batch_size
     )
 
-    server_round = msg.metadata.get("server_round", 0)
+    server_round = getattr(msg.metadata, "server_round", 0)
 
     train_loss = train_fn(
         model,
@@ -40,21 +36,6 @@ def train(msg: Message, context: Context):
         msg.content["config"]["lr"],
         device,
     )
-
-    run_dir = os.path.expanduser("~/coldstart_runs/flower_bigmodel")
-    cid = str(partition_id)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=msg.content["config"]["lr"])
-    meta = {
-        "partition": partition_id,
-        "dataset": dataset_name,
-        "train_loss": train_loss,
-    }
-
-    ckpt_path = save_client_ckpt(
-        run_dir, cid, server_round, model.state_dict(), optimizer.state_dict(), meta
-    )
-    print(f"cid={cid}, round={server_round:04d}, saved {os.path.basename(ckpt_path)}")
 
     model_record = ArrayRecord(model.state_dict())
     metrics = {

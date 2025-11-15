@@ -127,7 +127,7 @@ def load_data(
         dataloader = DataLoader(
             data,
             batch_sampler=sampler,
-            num_workers=4,
+            num_workers=0,  # Reduced from 4 to avoid shared memory issues in cluster
             collate_fn=collate_preprocessed,
         )
     else:
@@ -137,7 +137,7 @@ def load_data(
             batch_size=batch_size,
             shuffle=shuffle,
             sampler=sampler,
-            num_workers=4,
+            num_workers=0,  # Reduced from 4 to avoid shared memory issues in cluster
             collate_fn=collate_preprocessed,
         )
 

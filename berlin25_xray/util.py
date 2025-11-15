@@ -54,9 +54,13 @@ def log_training_metrics(replies, server_round):
     """Log training metrics to W&B."""
     log_dict = {}
     for reply in replies:
+        # Skip replies without content
+        if not reply.has_content():
+            continue
         hospital = f"Hospital{PARTITION_HOSPITAL_MAP[reply.content['metrics']['partition-id']]}"
         log_dict[f"{hospital}/train_loss"] = reply.content["metrics"]["train_loss"]
-    wandb.log(log_dict, step=server_round)
+    if log_dict:  # Only log if we have data
+        wandb.log(log_dict, step=server_round)
 
 
 def log_eval_metrics(replies, agg_metrics, server_round, weighted_by_key, log_fn):
@@ -65,6 +69,9 @@ def log_eval_metrics(replies, agg_metrics, server_round, weighted_by_key, log_fn
     log_dict = {}
 
     for reply in replies:
+        # Skip replies without content
+        if not reply.has_content():
+            continue
         hospital = f"Hospital{PARTITION_HOSPITAL_MAP[reply.content['metrics']['partition-id']]}"
         metrics = compute_metrics(reply.content["metrics"])
         n = reply.content["metrics"].get(weighted_by_key, 0)

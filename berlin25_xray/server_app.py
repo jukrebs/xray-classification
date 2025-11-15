@@ -17,7 +17,7 @@ from berlin25_xray.util import (
     save_best_model,
 )
 
-from ..fl_checkpoints import load_latest_server_ckpt, save_server_ckpt
+from berlin25_xray.fl_checkpoints import load_latest_server_ckpt, save_server_ckpt
 
 app = ServerApp()
 
@@ -27,7 +27,6 @@ def main(grid: Grid, context: Context) -> None:
     num_rounds: int = context.run_config["num-server-rounds"]
     lr: float = context.run_config["lr"]
     local_epochs: int = context.run_config["local-epochs"]
-    rounds_this_job: int = context.run_config.get("rounds-this-job", num_rounds)
 
     run_dir = os.path.expanduser("~/coldstart_runs/flower_bigmodel")
     os.makedirs(run_dir, exist_ok=True)
@@ -69,7 +68,6 @@ def main(grid: Grid, context: Context) -> None:
             "git_branch": branch,
             "git_commit": commit,
             "start_round": start_round,
-            "rounds_this_job": rounds_this_job,
         },
         tags=[branch, commit],
     )
@@ -81,7 +79,7 @@ def main(grid: Grid, context: Context) -> None:
     else:
         arrays = None
 
-    target_round = start_round + rounds_this_job - 1
+    target_round = start_round + num_rounds - 1
     strategy = HackathonFedAvg(
         fraction_train=1,
         run_name=run_name,
@@ -126,7 +124,9 @@ class HackathonFedAvg(FedAvg):
         log_training_metrics(replies, server_round)
 
         if self._run_dir and arrays:
-            param_arrays = parameters_to_ndarrays(arrays)
+            # Convert ArrayRecord to ndarrays, then to Parameters for checkpoint
+            state_dict = arrays.to_torch_state_dict()
+            param_arrays = [v.cpu().numpy() for v in state_dict.values()]
             param_obj = ndarrays_to_parameters(param_arrays)
             save_server_ckpt(
                 self._run_dir,
@@ -152,7 +152,7 @@ class HackathonFedAvg(FedAvg):
             lambda msg: log(INFO, msg),
         )
 
-        if hasattr(self, "_arrays"):
+        if hasattr(self, "_arrays") and self._arrays is not None:
             saved, msg = save_best_model(
                 self._arrays,
                 agg_metrics,
