@@ -176,7 +176,11 @@ def maybe_compile_model(model: nn.Module, *, mode: str, enabled: bool = True) ->
         return model
 
     try:
-        compiled_model = compile_fn(model)
+        try:
+            # Prefer reduce-overhead mode for shorter training runs
+            compiled_model = compile_fn(model, mode="reduce-overhead")
+        except TypeError:
+            compiled_model = compile_fn(model)
     except Exception as exc:  # pragma: no cover - backend specific
         logger.warning(
             "torch.compile failed for %s (falling back to eager): %s",
