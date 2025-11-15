@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.multiprocessing as mp
+from torch.cuda.amp import GradScaler
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from torchvision import models
@@ -24,7 +25,7 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 # Track per-split class balance to build better loss weights.
 hospital_class_stats = {}
 # Ray allocates limited CPU cores per client; cap DataLoader workers accordingly.
-DATALOADER_MAX_WORKERS = int(os.environ.get("DATALOADER_MAX_WORKERS", "6"))
+DATALOADER_MAX_WORKERS = int(os.environ.get("DATALOADER_MAX_WORKERS", "16"))
 
 try:  # Ensure dataloader workers use spawn to avoid shared memory issues
     mp.set_start_method("spawn", force=True)
@@ -116,7 +117,7 @@ def load_data(
     dataset_name: str,
     split_name: str,
     image_size: int = 224,
-    batch_size: int = 512,
+    batch_size: int = 1024,
 ):
     """Load hospital X-ray data.
 
@@ -185,17 +186,29 @@ def train(net, trainloader, epochs, lr, device, pos_weight: Optional[float] = No
         div_factor=10.0,
         final_div_factor=100.0,
     )
+    use_amp = device.type == "cuda" and torch.cuda.is_available()
+    scaler = GradScaler(enabled=use_amp)
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
         for batch in tqdm(trainloader):
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
-            optimizer.zero_grad()
-            outputs = net(x)
-            loss = criterion(outputs, y)
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.bfloat16,
+                enabled=use_amp,
+            ):
+                outputs = net(x)
+                loss = criterion(outputs, y)
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             scheduler.step()
             running_loss += loss.item()
     avg_loss = running_loss / (len(trainloader) * epochs)
