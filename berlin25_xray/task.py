@@ -70,7 +70,13 @@ class Net(nn.Module):
             logger.debug("Missing ViT weights (expected due to head swap): %s", missing)
 
         in_features = self.vit.heads.head.in_features
-        self.vit.heads.head = nn.Linear(in_features, 1)
+        self.vit.heads.head = nn.Sequential(
+            nn.LayerNorm(in_features),
+            nn.Linear(in_features, 256),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, 1),
+        )
 
         # Freeze all parameters by default.
         for param in self.vit.parameters():
@@ -366,18 +372,29 @@ def train(net, trainloader, epochs, lr, device):
         ]
         param_groups = []
         if head_params:
-            param_groups.append({"params": head_params, "lr": lr})
+            param_groups.append(
+                {
+                    "params": head_params,
+                    "lr": lr,
+                    "weight_decay": 0.01,
+                }
+            )
         if backbone_params:
             param_groups.append(
                 {
                     "params": backbone_params,
                     "lr": lr * VIT_BACKBONE_LR_SCALE,
+                    "weight_decay": 0.01,
                 }
             )
-        optimizer = torch.optim.Adam(param_groups)
+        optimizer = torch.optim.AdamW(param_groups)
     else:
         params = (p for p in net.parameters() if p.requires_grad)
-        optimizer = torch.optim.Adam(params, lr=lr)
+        optimizer = torch.optim.AdamW(
+            params,
+            lr=lr,
+            weight_decay=0.01,
+        )
     device_type = device.type
     use_amp = device_type == "cuda"
     try:
@@ -412,6 +429,18 @@ def train(net, trainloader, epochs, lr, device):
         for batch in progress:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
+
+            # Lightweight train-time augmentation to improve generalization
+            if net.training:
+                # Random horizontal flip (consistent with evaluation TTA)
+                if torch.rand(1).item() < 0.5:
+                    x = torch.flip(x, dims=[3])
+                # Small Gaussian noise in normalized space
+                noise_std = 0.01
+                if noise_std > 0.0:
+                    x = x + noise_std * torch.randn_like(x)
+                    x = x.clamp(-1.0, 1.0)
+
             optimizer.zero_grad(set_to_none=True)
             try:
                 autocast_ctx = amp.autocast(device_type=device_type, enabled=use_amp)
