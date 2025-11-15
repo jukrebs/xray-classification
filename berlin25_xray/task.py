@@ -132,9 +132,24 @@ def load_data(
     return dataloader
 
 
+class LabelSmoothingBCELoss(nn.Module):
+    """Binary cross-entropy with light label smoothing to improve calibration."""
+
+    def __init__(self, smoothing: float = 0.05):
+        super().__init__()
+        self.smoothing = float(smoothing)
+        self.bce = nn.BCEWithLogitsLoss()
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        smooth = self.smoothing
+        # Move targets slightly towards 0.5 to reduce overconfidence
+        targets_smoothed = targets * (1.0 - smooth) + 0.5 * smooth
+        return self.bce(inputs, targets_smoothed)
+
+
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    criterion = torch.nn.BCEWithLogitsLoss().to(device)
+    criterion = LabelSmoothingBCELoss(smoothing=0.05).to(device)
     optimizer = torch.optim.AdamW(
         (p for p in net.parameters() if p.requires_grad), lr=lr, weight_decay=0.01
     )
