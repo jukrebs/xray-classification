@@ -66,7 +66,7 @@ def _load_partition_split(partition_id: int, split: str, image_size: int, batch_
         split,
         image_size=image_size,
         batch_size=batch_size,
-        balance=(split == "train"),
+        balance=False,
     )
     logger.info(
         "%s dataloader ready | dataset=%s | samples=%d | batches=%d",

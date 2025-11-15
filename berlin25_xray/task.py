@@ -72,10 +72,10 @@ class Net(nn.Module):
         in_features = self.vit.heads.head.in_features
         self.vit.heads.head = nn.Sequential(
             nn.LayerNorm(in_features),
-            nn.Linear(in_features, 256),
+            nn.Linear(in_features, 512),
             nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, 1),
+            nn.Dropout(0.2),
+            nn.Linear(512, 1),
         )
 
         # Freeze all parameters by default.
@@ -366,32 +366,97 @@ def dataset_name_from_partition(partition_id: int) -> str:
     return f"Hospital{hospital}"
 
 
+def _compute_pos_weight_from_loader(trainloader, device):
+    """Compute pos_weight for BCE from the label distribution in the loader dataset."""
+
+    try:
+        ys = np.asarray(trainloader.dataset["y"], dtype=np.float32).reshape(-1)
+        num_pos = float((ys >= 0.5).sum())
+        num_neg = float((ys < 0.5).sum())
+    except Exception as exc:  # pragma: no cover - defensive, dataset-specific
+        logger.warning(
+            "Could not read labels from trainloader.dataset for pos_weight computation: %s",
+            exc,
+        )
+        return None
+
+    if num_pos == 0 or num_neg == 0:
+        logger.warning(
+            "Skipping pos_weight computation due to degenerate class distribution (pos=%s, neg=%s)",
+            num_pos,
+            num_neg,
+        )
+        return None
+
+    pos_weight_value = num_neg / num_pos
+    logger.info(
+        "Using BCEWithLogitsLoss with pos_weight=%.3f (pos=%d, neg=%d)",
+        pos_weight_value,
+        int(num_pos),
+        int(num_neg),
+    )
+    return torch.tensor([pos_weight_value], device=device)
+
+
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
-    criterion = torch.nn.BCEWithLogitsLoss().to(device)
+    pos_weight = _compute_pos_weight_from_loader(trainloader, device)
+    if pos_weight is not None:
+        criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(device)
+    else:
+        criterion = torch.nn.BCEWithLogitsLoss().to(device)
     if isinstance(net, Net):
         head_params = list(net.vit.heads.head.parameters())
         head_param_ids = {id(p) for p in head_params}
         backbone_params = [
-            p
-            for p in net.parameters()
-            if p.requires_grad and id(p) not in head_param_ids
+            p for p in net.parameters() if p.requires_grad and id(p) not in head_param_ids
         ]
+
+        def _split_decay(params):
+            decay = []
+            no_decay = []
+            for p in params:
+                if not p.requires_grad:
+                    continue
+                if p.ndim >= 2:
+                    decay.append(p)
+                else:
+                    no_decay.append(p)
+            return decay, no_decay
+
+        head_decay, head_no_decay = _split_decay(head_params)
+        backbone_decay, backbone_no_decay = _split_decay(backbone_params)
         param_groups = []
-        if head_params:
+        if head_decay:
             param_groups.append(
                 {
-                    "params": head_params,
+                    "params": head_decay,
                     "lr": lr,
-                    "weight_decay": 0.01,
+                    "weight_decay": 0.05,
                 }
             )
-        if backbone_params:
+        if head_no_decay:
             param_groups.append(
                 {
-                    "params": backbone_params,
+                    "params": head_no_decay,
+                    "lr": lr,
+                    "weight_decay": 0.0,
+                }
+            )
+        if backbone_decay:
+            param_groups.append(
+                {
+                    "params": backbone_decay,
                     "lr": lr * VIT_BACKBONE_LR_SCALE,
-                    "weight_decay": 0.01,
+                    "weight_decay": 0.05,
+                }
+            )
+        if backbone_no_decay:
+            param_groups.append(
+                {
+                    "params": backbone_no_decay,
+                    "lr": lr * VIT_BACKBONE_LR_SCALE,
+                    "weight_decay": 0.0,
                 }
             )
         optimizer = torch.optim.AdamW(param_groups)
@@ -442,11 +507,41 @@ def train(net, trainloader, epochs, lr, device):
                 # Random horizontal flip (consistent with evaluation TTA)
                 if torch.rand(1).item() < 0.5:
                     x = torch.flip(x, dims=[3])
+                # Global brightness/contrast jitter in normalized [-1, 1] space
+                bc_prob = 0.8
+                if torch.rand(1).item() < bc_prob:
+                    # Per-sample scalar brightness/contrast factors
+                    brightness_delta = 0.1
+                    contrast_delta = 0.1
+                    b = (
+                        (torch.rand(x.size(0), 1, 1, 1, device=x.device) - 0.5)
+                        * 2.0
+                        * brightness_delta
+                    )
+                    c = 1.0 + (
+                        (torch.rand(x.size(0), 1, 1, 1, device=x.device) - 0.5)
+                        * 2.0
+                        * contrast_delta
+                    )
+                    x = (x * c + b).clamp(-1.0, 1.0)
                 # Small Gaussian noise in normalized space
                 noise_std = 0.01
                 if noise_std > 0.0:
                     x = x + noise_std * torch.randn_like(x)
                     x = x.clamp(-1.0, 1.0)
+
+                # Mixup augmentation (cheap, improves ranking/AUROC)
+                mixup_alpha = 0.2
+                if mixup_alpha > 0.0 and x.size(0) > 1:
+                    lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+                    perm = torch.randperm(x.size(0), device=device)
+                    x_shuffled = x[perm]
+                    y_shuffled = y[perm]
+                    x = lam * x + (1.0 - lam) * x_shuffled
+                    y_a, y_b, mixup_lam = y, y_shuffled, lam
+                else:
+                    y_a = y_b = None
+                    mixup_lam = None
 
             optimizer.zero_grad(set_to_none=True)
             try:
@@ -458,7 +553,12 @@ def train(net, trainloader, epochs, lr, device):
                     autocast_ctx = amp.autocast(enabled=use_amp)
             with autocast_ctx:
                 outputs = net(x)
-                loss = criterion(outputs, y)
+                if mixup_lam is not None and y_a is not None and y_b is not None:
+                    loss = mixup_lam * criterion(outputs, y_a) + (1.0 - mixup_lam) * criterion(
+                        outputs, y_b
+                    )
+                else:
+                    loss = criterion(outputs, y)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -502,6 +602,8 @@ def test(net, testloader, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
     net.eval()
+    device_type = device.type
+    use_amp = device_type == "cuda"
     total_loss = 0.0
     num_batches = len(testloader)
     num_examples = len(testloader.dataset)
@@ -518,11 +620,20 @@ def test(net, testloader, device):
     all_labels = []
     eval_start = time.perf_counter()
     with torch.no_grad():
+        try:
+            autocast_ctx = amp.autocast(device_type=device_type, enabled=use_amp)
+        except TypeError:
+            try:
+                autocast_ctx = amp.autocast(device=device_type, enabled=use_amp)
+            except TypeError:
+                autocast_ctx = amp.autocast(enabled=use_amp)
+
         for batch in testloader:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
-            outputs = net(x)
-            loss = criterion(outputs, y)
+            with autocast_ctx:
+                outputs = net(x)
+                loss = criterion(outputs, y)
             total_loss += loss.item()
 
             # Get predictions and probabilities
@@ -530,7 +641,8 @@ def test(net, testloader, device):
 
             # Simple test-time augmentation: horizontal flip
             x_flip = torch.flip(x, dims=[3])
-            outputs_flip = net(x_flip)
+            with autocast_ctx:
+                outputs_flip = net(x_flip)
             probs_flip = torch.sigmoid(outputs_flip)
 
             probs = 0.5 * (probs + probs_flip)
