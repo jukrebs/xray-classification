@@ -23,12 +23,14 @@ hospital_datasets = {}  # Cache loaded hospital datasets
 
 
 class Net(nn.Module):
-    """CXformer-based encoder with lightweight binary classification head."""
+    """DenseNet-based encoder from TorchXRayVision with binary classifier."""
 
-    def __init__(self, model_name: Optional[str] = None, trust_remote_code: Optional[bool] = None):
+    def __init__(
+        self, model_name: Optional[str] = None, trust_remote_code: Optional[bool] = None
+    ):
         super().__init__()
         self.model_name = model_name or os.environ.get(
-            "XRAY_BACKBONE", "m42-health/CXformer-base"
+            "XRAY_DENSENET_MODEL", "torchxrayvision/densenet121-res224-chex"
         )
         if trust_remote_code is None:
             env_flag = os.environ.get("XRAY_TRUST_REMOTE_CODE", "true").lower()
@@ -37,17 +39,16 @@ class Net(nn.Module):
             self.model_name, trust_remote_code=trust_remote_code
         )
         self.encoder = AutoModel.from_pretrained(
-            self.model_name, trust_remote_code=trust_remote_code
+            self.model_name,
+            trust_remote_code=trust_remote_code,
+            torch_dtype="auto",
         )
-        for param in self.encoder.parameters():
-            param.requires_grad = False
-
         hidden_size = getattr(self.encoder.config, "hidden_size", None) or getattr(
             self.encoder.config, "embed_dim", None
         )
         if hidden_size is None:
             raise ValueError(
-                "Unable to determine hidden size for CXformer encoder configuration."
+                "Unable to determine hidden size for DenseNet encoder configuration."
             )
 
         head_hidden = max(512, hidden_size // 2)
@@ -62,7 +63,7 @@ class Net(nn.Module):
 
         size_cfg = self.image_processor.size
         if isinstance(size_cfg, dict):
-            height = size_cfg.get("height") or size_cfg.get("shortest_edge") or 518
+            height = size_cfg.get("height") or size_cfg.get("shortest_edge") or 224
             width = size_cfg.get("width") or size_cfg.get("shortest_edge") or height
         elif isinstance(size_cfg, (list, tuple)):
             height, width = size_cfg
@@ -84,7 +85,6 @@ class Net(nn.Module):
 
     def _prepare_pixel_values(self, x: torch.Tensor) -> torch.Tensor:
         x = x.float()
-        # Undo previous grayscale normalization if needed (data stored as [-1, 1]).
         x_detached = x.detach()
         if (x_detached.min() < 0) or (x_detached.max() > 1):
             x = x * 0.5 + 0.5
@@ -105,8 +105,10 @@ class Net(nn.Module):
         outputs = self.encoder(pixel_values=pixel_values)
         if getattr(outputs, "pooler_output", None) is not None:
             features = outputs.pooler_output
-        else:
+        elif getattr(outputs, "last_hidden_state", None) is not None:
             features = outputs.last_hidden_state[:, 0]
+        else:
+            features = outputs[0][:, 0]
         return self.classifier(features)
 
 
@@ -129,7 +131,7 @@ def load_data(
     dataset_name: str,
     split_name: str,
     image_size: int = 224,
-    batch_size: int = 32,
+    batch_size: int = 128,
 ):
     """Load hospital X-ray data.
 
@@ -169,11 +171,7 @@ def load_data(
 def train(net, trainloader, epochs, lr, device):
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    optimizer = torch.optim.AdamW(
-        (p for p in net.parameters() if p.requires_grad),
-        lr=lr,
-        weight_decay=0.01,
-    )
+    optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=0.01)
     net.train()
     running_loss = 0.0
     for _ in range(epochs):
