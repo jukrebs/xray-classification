@@ -46,7 +46,7 @@ clientapp = "berlin25_xray.client_app:app"
 [tool.flwr.app.config]
 image-size = 224        # Higher resolution for more detailed features
 batch-size = 512        # Smaller batch to avoid OOM at 224px
-num-server-rounds = 1   # Single round to match last good eval
+num-server-rounds = 2   # Two rounds to allow more training
 local-epochs = 3        # Keep local epochs modest
 lr = 0.0003             # Head LR; backbone scaled by VIT_BACKBONE_LR_SCALE
 compile-model = true    # Enable torch.compile for fused ViT execution
