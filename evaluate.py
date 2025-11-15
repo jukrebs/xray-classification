@@ -26,7 +26,7 @@ def main():
     print("MODEL EVALUATION")
     print("=" * 80)
 
-    model_path = "/home/team01/models/model_round2_auroc7675.pt"
+    model_path = "/home/team01/models/model_round6_auroc7757.pt"
     print(f"\nLoading model from {model_path}...")
 
     # Load model
