@@ -11,7 +11,6 @@ from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from torchvision import models
 from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
-from tqdm import tqdm
 
 PARTITION_HOSPITAL_MAP = {
     0: "A",
@@ -140,8 +139,9 @@ def load_data(
         data,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=0,  # Avoid shared-memory issues on constrained clusters
+        num_workers=2,
         pin_memory=False,
+        persistent_workers=False,
         collate_fn=collate_preprocessed,
     )
     return dataloader
@@ -172,7 +172,7 @@ def train(net, trainloader, epochs, lr, device):
     use_amp = device.type == "cuda"
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     for _ in range(epochs):
-        for batch in tqdm(trainloader):
+        for batch in trainloader:
             x = batch["x"].to(device, non_blocking=True).float()
             y = batch["y"].to(device, non_blocking=True).float()
             optimizer.zero_grad()

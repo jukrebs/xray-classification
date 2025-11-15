@@ -25,7 +25,12 @@ def train(msg: Message, context: Context):
     partition_id = context.node_config["partition-id"]
     dataset_name = f"Hospital{PARTITION_HOSPITAL_MAP[partition_id]}"
     image_size = context.run_config["image-size"]
-    trainloader = load_data(dataset_name, "train", image_size=image_size)
+    trainloader = load_data(
+        dataset_name,
+        "train",
+        image_size=image_size,
+        batch_size=128,
+    )
 
     # Call the training function
     train_loss = train_fn(
