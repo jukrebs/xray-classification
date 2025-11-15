@@ -49,7 +49,7 @@ batch-size = 1024       # Larger batch size for higher throughput per step
 num-server-rounds = 3   # Keep rounds modest to stay within 20min
 local-epochs = 4        # Slightly fewer epochs to reduce total compute
 lr = 0.0003             # Head LR; backbone scaled by VIT_BACKBONE_LR_SCALE
-compile-model = true    # Enable torch.compile for fused ViT execution
+compile-model = false    # Enable torch.compile for fused ViT execution
 
 # Default federation to use when running the app
 [tool.flwr.federations]
