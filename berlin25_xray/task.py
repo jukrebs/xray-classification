@@ -6,6 +6,7 @@ import contextlib
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_from_disk
@@ -128,21 +129,6 @@ class Net(nn.Module):
         return self.model(x)
 
 
-def collate_preprocessed(batch):
-    """Collate function for preprocessed data: Convert list of dicts to dict of batched tensors."""
-    result = {}
-    for key in batch[0].keys():
-        if key in ["x", "y"]:
-            # Convert lists back to tensors and stack
-            result[key] = torch.stack(
-                [torch.tensor(item[key], dtype=torch.float32) for item in batch]
-            )
-        else:
-            # Keep other fields as lists
-            result[key] = [item[key] for item in batch]
-    return result
-
-
 def load_data(
     dataset_name: str,
     split_name: str,
@@ -169,19 +155,24 @@ def load_data(
     global hospital_datasets
     if cache_key not in hospital_datasets:
         full_dataset = load_from_disk(dataset_path)
-        hospital_datasets[cache_key] = full_dataset[split_name]
+        split = full_dataset[split_name]
+        # Use efficient tensor formatting for PyTorch DataLoader
+        split.set_format(type="torch", columns=["x", "y"])
+        hospital_datasets[cache_key] = split
         print(f"Loaded {dataset_path}/{split_name}")
 
     data = hospital_datasets[cache_key]
     shuffle = split_name == "train"  # shuffle only for training splits
+    multiprocessing_ctx = mp.get_context("spawn")
     dataloader = DataLoader(
         data,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=2,
-        pin_memory=False,
-        persistent_workers=False,
-        collate_fn=collate_preprocessed,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
+        multiprocessing_context=multiprocessing_ctx,
     )
     return dataloader
 
