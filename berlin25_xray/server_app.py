@@ -43,15 +43,8 @@ def main(grid: Grid, context: Context) -> None:
 
     global_model = Net()
     arrays = ArrayRecord(global_model.state_dict())
+    strategy = HackathonFedAvg(fraction_train=1, run_name=run_name)
 
-    strategy = HackathonFedAvg(
-        fraction_train=1,
-        fraction_evaluate=1,
-        run_name=run_name,
-        min_train_nodes=1,
-        min_available_nodes=1,
-        min_evaluate_nodes=1,
-    )
     result = strategy.start(
         grid=grid,
         initial_arrays=arrays,
