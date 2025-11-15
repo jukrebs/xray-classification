@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.multiprocessing as mp
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from torchvision import models
@@ -20,6 +21,11 @@ PARTITION_HOSPITAL_MAP = {
 }
 
 hospital_datasets = {}  # Cache loaded hospital datasets
+
+try:  # Ensure dataloader workers use spawn to avoid shared memory issues
+    mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
 
 
 class Net(nn.Module):
@@ -51,8 +57,6 @@ class Net(nn.Module):
         for param in self.model.parameters():
             param.requires_grad = False
         modules_to_unfreeze = [
-            self.model.features.denseblock2,
-            self.model.features.transition2,
             self.model.features.denseblock3,
             self.model.features.transition3,
             self.model.features.denseblock4,
@@ -81,21 +85,6 @@ class Net(nn.Module):
         return self.model(x)
 
 
-def collate_preprocessed(batch):
-    """Collate function for preprocessed data: Convert list of dicts to dict of batched tensors."""
-    result = {}
-    for key in batch[0].keys():
-        if key in ["x", "y"]:
-            # Convert lists back to tensors and stack
-            result[key] = torch.stack(
-                [torch.tensor(item[key], dtype=torch.float32) for item in batch]
-            )
-        else:
-            # Keep other fields as lists
-            result[key] = [item[key] for item in batch]
-    return result
-
-
 def load_data(
     dataset_name: str,
     split_name: str,
@@ -122,18 +111,25 @@ def load_data(
     global hospital_datasets
     if cache_key not in hospital_datasets:
         full_dataset = load_from_disk(dataset_path)
+        for split in full_dataset.keys():
+            full_dataset[split].set_format(type="torch", columns=["x", "y"])
         hospital_datasets[cache_key] = full_dataset[split_name]
         print(f"Loaded {dataset_path}/{split_name}")
 
     data = hospital_datasets[cache_key]
     shuffle = split_name == "train"  # shuffle only for training splits
-    dataloader = DataLoader(
-        data,
+    num_workers = min(8, os.cpu_count() or 1)
+    dataloader_kwargs = dict(
+        dataset=data,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=4,
-        collate_fn=collate_preprocessed,
+        num_workers=num_workers,
+        pin_memory=True,
     )
+    if num_workers > 0:
+        dataloader_kwargs["prefetch_factor"] = 2
+        dataloader_kwargs["persistent_workers"] = True
+    dataloader = DataLoader(**dataloader_kwargs)
     return dataloader
 
 
