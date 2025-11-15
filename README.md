@@ -26,6 +26,7 @@ At a high level:
   - Evaluation uses ROC‑AUC and standard confusion‑matrix metrics (sensitivity, specificity, precision, F1).
 - **Compute/time budget**:
   - Each full federated run was limited to about **20 minutes on a single AMD MI300X GPU**, so we favored partial fine‑tuning, a relatively large batch size (512), and an aggressive OneCycle schedule to reach strong performance within this tight time budget.
+  - In the **winning configuration**, we ran **6 federated rounds** with **1 local epoch per round** on each hospital.
 
 ### 1.1. Model details
 
