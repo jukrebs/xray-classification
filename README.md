@@ -4,7 +4,9 @@ This repository contains our hackathon solution for federated chest X‑ray clas
 The goal is to train a federated model across multiple hospitals.
 
 
-This repo is based on the boilerplate for the [[Cold Start:] Distributed AI Hack Berlin](https://github.com/exalsius/hackathon-coldstart2025/tree/main)Hackathon.
+This repo is based on the boilerplate for the 
+[[Cold Start:] Distributed AI Hack Berlin](https://github.com/exalsius/hackathon-coldstart2025/tree/main)
+Hackathon.
 ---
 
 ## Prerequisites
