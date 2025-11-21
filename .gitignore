@@ -207,4 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 # Dataset
-xray
+xray/*
+!.gitkeep
+
+# Trained models
+models/*
+!.gitkeep

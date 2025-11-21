@@ -9,7 +9,6 @@ import warnings
 
 import numpy as np
 import torch
-import wandb
 from sklearn.metrics import roc_auc_score
 
 from berlin25_xray.task import (
@@ -50,16 +49,15 @@ def compute_aggregated_metrics(replies):
     return {"roc_auc": roc_auc, **cm_metrics}
 
 
-def log_training_metrics(replies, server_round):
+def log_training_metrics(replies):
     """Log training metrics to W&B."""
     log_dict = {}
     for reply in replies:
         hospital = f"Hospital{PARTITION_HOSPITAL_MAP[reply.content['metrics']['partition-id']]}"
         log_dict[f"{hospital}/train_loss"] = reply.content["metrics"]["train_loss"]
-    wandb.log(log_dict, step=server_round)
 
 
-def log_eval_metrics(replies, agg_metrics, server_round, weighted_by_key, log_fn):
+def log_eval_metrics(replies, agg_metrics, weighted_by_key, log_fn):
     """Log evaluation metrics to console and W&B."""
     log_fn("EVALUATION METRICS BY HOSPITAL")
     log_dict = {}
@@ -79,10 +77,10 @@ def log_eval_metrics(replies, agg_metrics, server_round, weighted_by_key, log_fn
         log_fn(f"  {k:12s}: {v:.4f}")
         log_dict[f"Global/{k}"] = v
 
-    wandb.log(log_dict, step=server_round)
 
-
-def save_best_model(arrays, agg_metrics, server_round, run_name, best_auroc_tracker):
+def save_best_model(
+    arrays, agg_metrics, server_round, best_auroc_tracker, model_dir=None
+):
     """Save model artifact if it's the best so far.
 
     Returns updated best_auroc_tracker dict with 'auroc' key.
@@ -96,23 +94,12 @@ def save_best_model(arrays, agg_metrics, server_round, run_name, best_auroc_trac
         best_auroc_tracker["auroc"] = current_auroc
 
         auroc_str = f"{int(current_auroc * 10000):04d}"
-        state_dict_file = os.path.expanduser(
-            f"~/model_round{server_round}_auroc{auroc_str}.pt"
-        )
+        state_dict_file = os.path.join(model_dir, f"run_{auroc_str}.pt")
         torch.save(arrays.to_torch_state_dict(), state_dict_file)
-
-        metadata = {**agg_metrics, "round": server_round}
-        artifact_name = f"{run_name}_round{server_round}_auroc{auroc_str}"
-        artifact = wandb.Artifact(artifact_name, type="model", metadata=metadata)
-        artifact.add_file(state_dict_file)
-        wandb.log_artifact(artifact)
-
-        # Clean up temp file after upload
-        os.remove(state_dict_file)
 
         return (
             True,
-            f"✓ New best model! Round {server_round}, AUROC: {current_auroc:.4f}",
+            f"New best model! Round {server_round}, AUROC: {current_auroc:.4f}, saved to {state_dict_file}",
         )
     else:
         return (

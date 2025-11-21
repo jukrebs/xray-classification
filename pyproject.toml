@@ -10,9 +10,10 @@ build-backend = "hatchling.build"
 [project]
 name = "berlin25-xray"
 version = "1.0.0"
-description = ""
+description = "Binary chest X-Ray classification using Flower"
+readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.9,<3.13"
+requires-python = ">=3.12"
 dependencies = [
     "flwr[simulation]>=1.22.0",
     "ray>=2.0.0",
@@ -21,15 +22,8 @@ dependencies = [
     "datasets",
     "scipy",
     "scikit-learn",
-    "wandb",
     "transformers",
-
-    # Analysis and visualization
-    "jupyterlab",
-    "marimo",
-    "pandas",
-    "matplotlib",
-    "seaborn",
+    "numpy",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -38,15 +32,15 @@ packages = ["."]
 [tool.flwr.app]
 publisher = "hackathon"
 
-# Point to your ServerApp and ClientApp objects
 [tool.flwr.app.components]
 serverapp = "berlin25_xray.server_app:app"
 clientapp = "berlin25_xray.client_app:app"
 
 # Custom config values accessible via `context.run_config`
 [tool.flwr.app.config]
-image-size = 224        # Image size (128 or 224)
-num-server-rounds = 100 # Slurm processes are capped to 15min
+batch-size = 32
+image-size = 224
+num-server-rounds = 10
 local-epochs = 2
 lr = 0.001
 

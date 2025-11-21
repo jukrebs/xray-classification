@@ -1,17 +1,15 @@
 """berlin25-xray: A Flower / PyTorch app for federated X-ray classification."""
 
 import os
-from typing import Optional
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.multiprocessing as mp
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from torchvision import models
-from torchvision.transforms import Compose, Grayscale, Normalize, Resize, ToTensor
 from tqdm import tqdm
 
 PARTITION_HOSPITAL_MAP = {
@@ -81,6 +79,7 @@ class Net(nn.Module):
         return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
         x = self._prepare_input(x)
         return self.model(x)
 
@@ -89,7 +88,7 @@ def load_data(
     dataset_name: str,
     split_name: str,
     image_size: int = 224,
-    batch_size: int = 512,
+    batch_size: int = 16,
 ):
     """Load hospital X-ray data.
 
@@ -99,16 +98,14 @@ def load_data(
         image_size: Image size (128 or 224)
         batch_size: Number of samples per batch
     """
-    dataset_dir = os.environ["DATASET_DIR"]
+    dataset_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "xray"))
 
     # Use preprocessed dataset based on image_size
     cache_key = f"{dataset_name}_{split_name}_{image_size}"
-    dataset_path = (
-        f"{dataset_dir}/xray_fl_datasets_preprocessed_{image_size}/{dataset_name}"
-    )
+    dataset_path = f"{dataset_dir}/preprocessed_{image_size}/{dataset_name}"
 
     # Load and cache dataset
-    global hospital_datasets
+    global hospital_datasets  # pylint: disable=global-variable-not-assigned
     if cache_key not in hospital_datasets:
         full_dataset = load_from_disk(dataset_path)
         for split in full_dataset.keys():
@@ -134,6 +131,11 @@ def load_data(
 
 
 def train(net, trainloader, epochs, lr, device):
+    """Train the model on the training set.
+
+    Returns:
+        avg_loss: Average training loss.
+    """
     net.to(device)
     criterion = torch.nn.BCEWithLogitsLoss().to(device)
     optimizer = torch.optim.AdamW(
@@ -234,52 +236,3 @@ def compute_metrics_from_confusion_matrix(tp, tn, fp, fn):
         "precision": precision,
         "f1": f1,
     }
-
-
-def apply_transforms(batch, image_size):
-    """For reference: This is the apply_transforms we used for image preprocessing."""
-    result = {}
-
-    _transform_pipeline = Compose(
-        [
-            Resize((image_size, image_size)),
-            Grayscale(num_output_channels=1),
-            ToTensor(),
-            Normalize(mean=[0.5], std=[0.5]),  # Normalize for grayscale
-        ]
-    )
-
-    # Transform images and stack them into a tensor
-    transformed_images = [_transform_pipeline(img) for img in batch["image"]]
-    result["x"] = torch.stack(transformed_images)
-
-    # Binary classification: 0 for "No Finding", 1 for any finding
-    labels = []
-    for label_list in batch["label"]:
-        # If "No Finding" is the only label, it's 0; otherwise it's 1
-        has_finding = not (len(label_list) == 1 and label_list[0] == "No Finding")
-        labels.append(torch.tensor([float(has_finding)]))
-    result["y"] = torch.stack(labels)
-
-    return result
-
-
-# For reference: These are all labels in the original dataset.
-# In the challenge we only consider a binary classification: (no) finding.
-LABELS = [
-    "No Finding",
-    "Atelectasis",
-    "Cardiomegaly",
-    "Effusion",
-    "Infiltration",
-    "Mass",
-    "Nodule",
-    "Pneumonia",
-    "Pneumothorax",
-    "Consolidation",
-    "Edema",
-    "Emphysema",
-    "Fibrosis",
-    "Pleural_Thickening",
-    "Hernia",
-]

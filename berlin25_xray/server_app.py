@@ -1,8 +1,10 @@
+"""Flower server for federated training of X-ray classification model."""
+
 import os
 import subprocess
+from datetime import datetime
 from logging import INFO
 
-import wandb
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
@@ -21,9 +23,9 @@ app = ServerApp()
 
 @app.main()
 def main(grid: Grid, context: Context) -> None:
+    """Main server application entry point."""
     num_rounds: int = context.run_config["num-server-rounds"]
     lr: float = context.run_config["lr"]
-    local_epochs: int = context.run_config["local-epochs"]
 
     def git_cmd(args):
         return subprocess.check_output(["git"] + args).decode("utf-8").strip()
@@ -31,35 +33,24 @@ def main(grid: Grid, context: Context) -> None:
     try:
         branch = git_cmd(["rev-parse", "--abbrev-ref", "HEAD"])
         commit = git_cmd(["rev-parse", "--short", "HEAD"])
-    except Exception:
+    except Exception:  # pylint: disable=broad-except
         branch, commit = "unknown", "unknown"
 
-    env_run_name = os.environ.get("JOB_NAME")
-    run_name = env_run_name or f"{branch}-{commit}"
+    run_name = f"{branch}-{commit}"
 
-    # W&B auth and project/entity are configured via environment variables
-    wandb.login()
-    log(INFO, "Wandb login successful")
-    wandb.init(
-        project="hackathon",
-        entity="justus-krebs-technische-universit-t-berlin",
-        name=run_name,
-        config={
-            "num_rounds": num_rounds,
-            "learning_rate": lr,
-            "local_epochs": local_epochs,
-            "git_branch": branch,
-            "git_commit": commit,
-        },
-        tags=[branch, commit],
-    )
-    log(INFO, "Wandb initialized with run_id: %s", wandb.run.id)
+    # Create model directory: models/run_<commit>_<time>
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_dir_name = f"run_{commit}_{timestamp}"
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    model_dir = os.path.join(project_root, "models", model_dir_name)
+    os.makedirs(model_dir, exist_ok=True)
+    print(f"Model checkpoints will be saved to: {model_dir}")
 
     global_model = Net()
     arrays = ArrayRecord(global_model.state_dict())
-    strategy = HackathonFedAvg(fraction_train=1, run_name=run_name)
+    strategy = HackathonFedAvg(run_name=run_name, model_dir=model_dir)
 
-    result = strategy.start(
+    _ = strategy.start(
         grid=grid,
         initial_arrays=arrays,
         train_config=ConfigRecord({"lr": lr}),
@@ -67,22 +58,22 @@ def main(grid: Grid, context: Context) -> None:
     )
 
     log(INFO, "Training complete")
-    wandb.finish()
-    log(INFO, "Wandb run finished")
 
 
 class HackathonFedAvg(FedAvg):
-    """FedAvg strategy that logs metrics and saves best model to W&B."""
+    """FedAvg strategy that logs metrics."""
 
-    def __init__(self, *args, run_name=None, **kwargs):
+    def __init__(self, *args, run_name=None, model_dir=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._best_auroc = {}
-        self._run_name = run_name or "your_run"
+        self._run_name = run_name
+        self._model_dir = model_dir
+        self._arrays = None
 
     def aggregate_train(self, server_round, replies):
         arrays, metrics = super().aggregate_train(server_round, replies)
         self._arrays = arrays
-        log_training_metrics(replies, server_round)
+        log_training_metrics(replies)
         return arrays, metrics
 
     def aggregate_evaluate(self, server_round, replies):
@@ -90,18 +81,18 @@ class HackathonFedAvg(FedAvg):
         log_eval_metrics(
             replies,
             agg_metrics,
-            server_round,
             self.weighted_by_key,
             lambda msg: log(INFO, msg),
         )
+        print(f"DEBUG:{hasattr(self, '_arrays')}")
 
         if hasattr(self, "_arrays"):
-            saved, msg = save_best_model(
-                self._arrays,
-                agg_metrics,
-                server_round,
-                self._run_name,
-                self._best_auroc,
+            _, msg = save_best_model(
+                arrays=self._arrays,
+                agg_metrics=agg_metrics,
+                server_round=server_round,
+                best_auroc_tracker=self._best_auroc,
+                model_dir=self._model_dir,
             )
             log(INFO, msg)
 

@@ -1,4 +1,4 @@
-"""Evaluation script for teams and organizers.
+"""Evaluation script.
 
 Usage: python evaluate.py
 """
@@ -11,27 +11,43 @@ from sklearn.metrics import roc_auc_score
 
 from berlin25_xray.task import Net, load_data, test
 
-DATASET_DIR = os.environ["DATASET_DIR"]
+IMAGE_SIZE = 128
+BATCH_SIZE = 16
+# Insert model path here
+MODEL_PATH = "models/run_c5af1f4_20251121_163618/run_7756.pt"
 
 
 def evaluate_split(model, dataset_name, split_name, device):
     """Evaluate on any dataset split and return predictions."""
-    loader = load_data(dataset_name, split_name, batch_size=32)
+    loader = load_data(
+        dataset_name, split_name, batch_size=BATCH_SIZE, image_size=IMAGE_SIZE
+    )
     _, _, _, _, _, probs, labels = test(model, loader, device)
     return probs, labels
 
 
 def main():
+    """Main evaluation script."""
     print("=" * 80)
     print("MODEL EVALUATION")
     print("=" * 80)
 
-    model_path = "/home/team01/models/model_round6_auroc7760.pt"
-    print(f"\nLoading model from {model_path}...")
+    if not os.path.isfile(MODEL_PATH):
+        raise FileNotFoundError(f"Model not found in: {MODEL_PATH}")
+    print(f"\nLoading model from {MODEL_PATH}...")
 
     # Load model
-    model = Net()
-    model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+    model = Net(image_size=IMAGE_SIZE)
+    checkpoint = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
+
+    # Handle different checkpoint formats
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        # Local training format: {"model_state_dict": ..., "auroc": ...}
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        # Federated training format: just the state_dict
+        model.load_state_dict(checkpoint)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     print(f"Model loaded on {device}.")
