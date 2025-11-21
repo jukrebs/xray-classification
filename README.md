@@ -65,7 +65,8 @@ uv run scripts/evaluate.py
 
 This script will produce a summary of your model's performance like so:
 
-**MODEL EVALUATION**
+```text
+MODEL EVALUATION
 Loading model from models/hospital_A_size224_model.pt...
 Model loaded on cuda.
 
@@ -84,8 +85,10 @@ Loaded xray-classification/xray/preprocessed_128/Test/test_C
   Test C          AUROC: 0.7220 (n=2617)
 Loaded xray-classification/xray/preprocessed_128/Test/test_D
   Test D (OOD)    AUROC: 0.7205 (n=5539)
+
   Eval Avg        AUROC: 0.7306
   Test Avg        AUROC: 0.7240
+```
 
 ## Improving the model
 Please feel free to improve the current model or try a new approach. Open a PR, explain what you have done, and add your model performance.
